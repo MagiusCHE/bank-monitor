@@ -1,0 +1,61 @@
+"""Esempio di ``local_seed.py`` — configurazione privata, NON committata.
+
+Copiare questo file in ``server/app/local_seed.py`` (gitignored) e personalizzarlo.
+Viene caricato da ``seed.py`` al primo boot *e* a ogni ``POST /api/seed``.
+
+Regole di merge con la seed pubblica:
+
+- ``EXTRA_TAG_RULES``: vengono **appese** alla lista di ``TAG_RULES`` in ``seed.py``.
+  Ogni regola assegna 1 tag, più regole possono assegnare lo stesso tag → la tx lo
+  riceve una volta sola. Quindi per aggiungere una keyword a un tag esistente della
+  seed pubblica basta creare una nuova regola qui con lo stesso ``tag``.
+
+- ``EXTRA_GROUPS``: **merge per nome**. Se un gruppo qui dentro ha lo stesso ``name``
+  di un gruppo pubblico (es. ``"Spesa"``), i suoi ``tags`` vengono aggiunti a quelli
+  del gruppo pubblico (senza duplicati). ``kind``/``priority`` del gruppo pubblico
+  NON vengono sovrascritti. Per creare un gruppo nuovo, usare un nome che non sia già
+  nella seed pubblica.
+
+Se vuoi un override *totale* di un gruppo pubblico senza toccare la seed, la strada
+è: eliminare il gruppo pubblico via UI/API una volta, poi definirlo qui con lo stesso
+nome. Alla prossima ``POST /api/seed`` il gruppo verrà ricreato con i *tuoi* tag più
+quelli della seed pubblica — quindi per un vero override serve anche rimuovere i tag
+dalla riga corrispondente di ``seed.py``, ma ciò richiederebbe di modificare file
+committati. In quel caso il flusso più pulito è: modificare via UI la configurazione
+e NON usare ``POST /api/seed`` (che è distruttivo).
+"""
+from __future__ import annotations
+
+
+# Formato: (name, pattern, tag, priority)
+# - pattern: regex Python, di solito prefissa con (?i) per case-insensitive
+# - tag:     nome del tag. Più regole che producono lo stesso tag sono ok.
+# - priority: numero intero, più basso = applicata prima (utile solo per l'ordinamento UI).
+EXTRA_TAG_RULES: list[tuple[str, str, str, int]] = [
+    # --- Esempio: aggiungere keyword a tag pubblici esistenti ---
+    # ("Bar del paese",          r"(?i)\bbar\s+pippo\b|\bcaffè\s+centrale\b", "bar",       1000),
+    # ("Pizzeria sotto casa",    r"(?i)pizzeria\s+da\s+mario",                "pizzeria",  1001),
+    # ("Farmacia Rossi",         r"(?i)farmacia\s+rossi",                     "farmacia",  1002),
+
+    # --- Esempio: nuovi tag custom (usati poi in EXTRA_GROUPS qui sotto) ---
+    # ("Piscina famiglia",       r"(?i)centro\s*nuoto\s*esempio",             "piscina",        2000),
+    # ("Lezioni musica",         r"(?i)scuola\s*musica\s*esempio",            "musica",         2001),
+    # ("Bonifici famiglia",      r"(?i)(?:Ord|Ben|Beneficiario)\s*:\s*[^:]*?(?:\brossi\b|\bbianchi\b)", "famiglia", 2002),
+]
+
+
+# Formato: (name, kind, priority, [tags])
+# - kind:     "income" | "expense" | "any"
+# - priority: un gruppo con priority più bassa viene valutato prima quando
+#             una tx ha tag che appartengono a più gruppi.
+# - tags:     lista di tag inclusi nel gruppo. Se una tx ha almeno uno di questi
+#             tag (e il kind è compatibile col segno), viene catturata dal gruppo.
+EXTRA_GROUPS: list[tuple[str, str, int, list[str]]] = [
+    # --- Esempio: aggiungere un tag a un gruppo pubblico (merge by name) ---
+    # ("Spesa", "expense", 110, ["drogheria-locale"]),
+    #   → il tag "drogheria-locale" viene aggiunto ai tag del gruppo pubblico "Spesa".
+
+    # --- Esempio: gruppo totalmente custom ---
+    # ("Famiglia",  "any",     50,  ["famiglia"]),
+    # ("Attività",  "expense", 95,  ["piscina", "musica"]),
+]

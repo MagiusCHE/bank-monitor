@@ -1,0 +1,16 @@
+# Virtualenv locale
+.venv/
+
+# Bytecode Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Database SQLite creato a runtime
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Configurazione seed privata (dati personali). Vedi app/local_seed.py.example
+app/local_seed.py

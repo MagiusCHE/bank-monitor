@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bank Monitor</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>Bank Monitor</h1>
+      <nav class="view-tabs">
+        <button class="view-tab active" data-view="cumulative">Cumulativa</button>
+        <button class="view-tab" data-view="per-account">Per conto</button>
+        <button class="view-tab" data-view="groups">Gruppi</button>
+      </nav>
+      <div class="header-actions">
+        <button id="upload-btn" title="Carica file movimenti">Carica file</button>
+        <button id="settings-btn" title="Impostazioni">⚙</button>
+        <button id="theme-toggle" title="Tema: sistema">◐</button>
+      </div>
+    </header>
+
+    <input type="file" id="file-input" accept=".xlsx,.xlsm" style="display:none">
+
+    <!-- Pannello impostazioni -->
+    <section id="settings-panel" class="panel hidden">
+      <h2>Impostazioni</h2>
+      <div class="setting-row">
+        <label for="server-url-input">Indirizzo server</label>
+        <input type="text" id="server-url-input" placeholder="http://bank-monitor-server:8765" spellcheck="false">
+      </div>
+      <div class="setting-row">
+        <button id="test-connection-btn">Test connessione</button>
+        <span id="test-connection-status"></span>
+      </div>
+      <div class="setting-row">
+        <button id="save-settings-btn" class="primary">Salva</button>
+        <button id="close-settings-btn">Chiudi</button>
+      </div>
+    </section>
+
+    <!-- Barra di stato / filtri -->
+    <section id="toolbar" class="panel hidden">
+      <div class="toolbar-row">
+        <label>
+          <input type="checkbox" id="include-authorized"> Includi movimenti autorizzati
+        </label>
+        <label title="Esclude compravendite titoli, dividendi, cedole — le vedi nella vista Gruppi">
+          <input type="checkbox" id="exclude-trading" checked> Escludi compravendite/titoli
+        </label>
+        <span class="flex-spacer"></span>
+        <label>Da <input type="date" id="date-from"></label>
+        <label>A <input type="date" id="date-to"></label>
+        <button id="refresh-btn" title="Aggiorna">↻</button>
+      </div>
+      <div class="toolbar-row" id="account-picker-row">
+        <span class="label">Conti:</span>
+        <div id="account-picker"></div>
+      </div>
+    </section>
+
+    <!-- Stato / messaggi -->
+    <div id="status-msg" class="status-msg"></div>
+
+    <!-- Contenitore grafico -->
+    <section id="chart-section" class="panel hidden">
+      <canvas id="main-chart"></canvas>
+    </section>
+
+    <!-- Drill-down movimenti (vista Gruppi) -->
+    <section id="drill-panel" class="panel hidden">
+      <div class="drill-header">
+        <h2 id="drill-title">Movimenti</h2>
+        <span id="drill-summary" class="hint"></span>
+        <span class="flex-spacer"></span>
+        <button id="drill-close">Chiudi</button>
+      </div>
+      <div class="drill-table-wrapper">
+        <table id="drill-table">
+          <thead>
+            <tr>
+              <th>Data valuta</th>
+              <th>Conto</th>
+              <th>Descrizione</th>
+              <th class="amount-col">Importo</th>
+              <th>Stato</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Pannello classificazione (tag-rules + gruppi + non classificate) -->
+    <section id="groups-panel" class="panel hidden">
+      <div class="drill-header">
+        <h2>Classificazione</h2>
+        <span class="flex-spacer"></span>
+        <button id="reload-config-btn" title="Ricarica configurazione dal server">Ricarica</button>
+        <button id="reset-seed-btn" title="Riporta tag-rules e gruppi alla configurazione iniziale. Le tue modifiche vanno perse.">Reimposta a iniziale</button>
+      </div>
+
+      <!-- Sezione Tag-rules -->
+      <details class="config-section" id="section-rules" open>
+        <summary>
+          Regole di tagging
+          <span class="badge" id="rules-count">0</span>
+          <span class="flex-spacer"></span>
+          <button id="save-rules-btn" class="primary" disabled>Salva modifiche</button>
+          <button id="add-rule-btn">+ Nuova regola</button>
+        </summary>
+        <p class="hint">Ogni regola applica un tag ai movimenti la cui descrizione matcha la regex. Un movimento può ricevere più tag (tutte le regole vengono applicate).</p>
+        <table class="rules-table">
+          <thead>
+            <tr>
+              <th style="width:60px">#</th>
+              <th>Nome</th>
+              <th>Regex</th>
+              <th>Tag</th>
+              <th style="width:60px"></th>
+            </tr>
+          </thead>
+          <tbody id="rules-tbody"></tbody>
+        </table>
+      </details>
+
+      <!-- Sezione Gruppi -->
+      <details class="config-section" id="section-groups" open>
+        <summary>
+          Gruppi (aggregati di tag)
+          <span class="badge" id="groups-count">0</span>
+          <span class="flex-spacer"></span>
+          <button id="save-groups-btn" class="primary" disabled>Salva modifiche</button>
+          <button id="add-group-btn">+ Nuovo gruppo</button>
+        </summary>
+        <p class="hint">Ogni gruppo cattura i movimenti che hanno almeno uno dei tag indicati. L'ordine conta: il primo gruppo compatibile con la transazione la cattura.</p>
+        <table class="groups-table">
+          <thead>
+            <tr>
+              <th style="width:60px">#</th>
+              <th>Nome</th>
+              <th>Tipo</th>
+              <th>Tag inclusi</th>
+              <th style="width:60px"></th>
+            </tr>
+          </thead>
+          <tbody id="groups-tbody"></tbody>
+        </table>
+      </details>
+
+      <!-- Sezione Non classificate -->
+      <details class="config-section" id="section-untagged">
+        <summary>
+          Movimenti non taggati
+          <span class="badge" id="untagged-count">-</span>
+        </summary>
+        <p class="hint">Movimenti a cui nessuna regola assegna un tag. Aggiungi una regola per classificarli.</p>
+        <div class="drill-table-wrapper">
+          <table id="untagged-table">
+            <thead>
+              <tr>
+                <th>Data valuta</th>
+                <th>Conto</th>
+                <th>Descrizione</th>
+                <th class="amount-col">Importo</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </details>
+    </section>
+
+    <!-- Info upload -->
+    <section id="upload-result" class="panel hidden"></section>
+  </div>
+
+  <script src="main.js"></script>
+</body>
+</html>

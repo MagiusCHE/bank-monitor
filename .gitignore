@@ -1,0 +1,16 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Log e file di scratch
+*.log
+/tmp/
+
+# File di test locale non committabili
+/movements_*.xlsx
+/server/data/
