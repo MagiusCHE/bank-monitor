@@ -30,3 +30,7 @@ client/src-tauri/gen/
 
 # Release locale (dry-run)
 release-dry-run/
+
+
+/package.json
+/scripts

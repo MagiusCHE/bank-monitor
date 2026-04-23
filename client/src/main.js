@@ -48,6 +48,17 @@ async function tauriDialogOpen(options) {
   return await m.open(options);
 }
 
+async function applyAppVersion() {
+  let version = "";
+  if (hasTauri && window.__TAURI__.app?.getVersion) {
+    try { version = await window.__TAURI__.app.getVersion(); } catch { /* ignore */ }
+  }
+  const suffix = version ? ` v${version}` : "";
+  document.title = `Bank Monitor${suffix}`;
+  const el = document.getElementById("app-version");
+  if (el) el.textContent = suffix;
+}
+
 // -------- Tema --------
 const THEME_ICONS = { system: "◐", light: "☀️", dark: "🌙" };
 const THEME_CYCLE = ["system", "light", "dark"];
@@ -1554,6 +1565,7 @@ function cycleTheme() {
 
 // -------- Init --------
 async function init() {
+  await applyAppVersion();
   await loadConfig();
 
   $("#upload-btn").onclick = doUpload;

@@ -722,6 +722,15 @@ input[type=text]:focus, input[type=date]:focus, select:focus {
   margin-left: auto;
 }
 
+footer {
+  text-align: center;
+  padding: 12px 0 4px;
+  margin-top: 16px;
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+
 @media (max-width: 720px) {
   .group-form { grid-template-columns: 1fr 1fr; }
   h1 { font-size: 1.1rem; }
