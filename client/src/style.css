@@ -515,7 +515,7 @@ input[type=text]:focus, input[type=date]:focus, select:focus {
 
 .rules-table .col-priority,
 .groups-table .col-priority {
-  width: 60px;
+  width: 80px;
 }
 
 .rules-table td.col-pattern input { font-family: monospace; font-size: 0.82rem; }
