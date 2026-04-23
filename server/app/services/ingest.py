@@ -130,6 +130,12 @@ def ingest(parsed: ParsedFile) -> IngestResult:
                 else:
                     raise
 
+        # Se sono arrivate nuove righe bancarie e ci sono ledger PayPal pendenti,
+        # tenta il match (import ritardato per evitare cicli e per tenere la fase PayPal opzionale).
+        if inserted > 0:
+            from .paypal import rematch_pending
+            rematch_pending(conn)
+
         return IngestResult(
             account_id=account_id,
             account_number=parsed.account_number,

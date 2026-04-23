@@ -26,6 +26,12 @@ const state = {
   openaiModel: "gpt-4o",
 };
 
+// Descrizione da mostrare per una transazione: priorità enriched (da PayPal match)
+// → full_description (estesa Fineco) → description (corta).
+function descOf(row) {
+  return row.enriched_description || row.full_description || row.description || "";
+}
+
 let chart = null;
 const TRASH_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
 const SAVE_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>';
@@ -478,9 +484,14 @@ async function onFileSelected(e) {
   setStatus(`Caricamento ${file.name}...`);
   try {
     const res = await apiUpload(file);
-    const msg = res.created_account
-      ? `Conto ${res.account.account_number} creato. ${res.inserted} movimenti inseriti.`
-      : `${res.inserted} nuovi movimenti (${res.skipped_duplicates} già presenti).`;
+    let msg;
+    if (res.source === "paypal") {
+      msg = `CSV PayPal: ${res.inserted} nuove righe (${res.skipped_duplicates} già presenti), ${res.newly_matched} abbinate, ${res.transactions_enriched} movimenti arricchiti.`;
+    } else if (res.created_account) {
+      msg = `Conto ${res.account.account_number} creato. ${res.inserted} movimenti inseriti.`;
+    } else {
+      msg = `${res.inserted} nuovi movimenti (${res.skipped_duplicates} già presenti).`;
+    }
     setStatus(msg, "ok");
     showUploadResult(res);
     await refreshAll();
@@ -492,20 +503,35 @@ async function onFileSelected(e) {
 function showUploadResult(res) {
   const host = $("#upload-result");
   host.classList.remove("hidden");
-  host.innerHTML = `
-    <h2>Risultato caricamento</h2>
-    <table>
-      <tr><td>Template</td><td>${res.template}</td></tr>
-      <tr><td>Conto</td><td>${res.account.account_number} — ${res.account.holder_name}</td></tr>
-      <tr><td>Periodo file</td><td>${res.period_from || "?"} → ${res.period_to || "?"}</td></tr>
-      <tr><td>Saldo iniziale</td><td>${fmtEur(res.account.initial_balance)} (dal ${res.account.initial_balance_date || "?"})</td></tr>
-      <tr><td>Movimenti nel file</td><td>${res.total_in_file}</td></tr>
-      <tr><td>Nuovi inseriti</td><td class="value-positive">${res.inserted}</td></tr>
-      <tr><td>Duplicati ignorati</td><td>${res.skipped_duplicates}</td></tr>
-      <tr><td>Conto creato</td><td>${res.created_account ? "sì" : "no"}</td></tr>
-      <tr><td>Saldo iniziale aggiornato</td><td>${res.initial_balance_updated ? "sì" : "no"}</td></tr>
-    </table>
-  `;
+  if (res.source === "paypal") {
+    host.innerHTML = `
+      <h2>Risultato caricamento — CSV PayPal</h2>
+      <table>
+        <tr><td>Righe nel file</td><td>${res.total_in_file}</td></tr>
+        <tr><td>Righe utili (con merchant)</td><td>${res.candidate_rows}</td></tr>
+        <tr><td>Nuove inserite nel registro PayPal</td><td class="value-positive">${res.inserted}</td></tr>
+        <tr><td>Già presenti (ignorate)</td><td>${res.skipped_duplicates}</td></tr>
+        <tr><td>Nuovi abbinamenti a movimenti bancari</td><td class="value-positive">${res.newly_matched}</td></tr>
+        <tr><td>Non ancora abbinate (totale)</td><td>${res.unmatched}</td></tr>
+        <tr><td>Movimenti bancari con descrizione arricchita</td><td>${res.transactions_enriched}</td></tr>
+      </table>
+    `;
+  } else {
+    host.innerHTML = `
+      <h2>Risultato caricamento</h2>
+      <table>
+        <tr><td>Template</td><td>${res.template}</td></tr>
+        <tr><td>Conto</td><td>${res.account.account_number} — ${res.account.holder_name}</td></tr>
+        <tr><td>Periodo file</td><td>${res.period_from || "?"} → ${res.period_to || "?"}</td></tr>
+        <tr><td>Saldo iniziale</td><td>${fmtEur(res.account.initial_balance)} (dal ${res.account.initial_balance_date || "?"})</td></tr>
+        <tr><td>Movimenti nel file</td><td>${res.total_in_file}</td></tr>
+        <tr><td>Nuovi inseriti</td><td class="value-positive">${res.inserted}</td></tr>
+        <tr><td>Duplicati ignorati</td><td>${res.skipped_duplicates}</td></tr>
+        <tr><td>Conto creato</td><td>${res.created_account ? "sì" : "no"}</td></tr>
+        <tr><td>Saldo iniziale aggiornato</td><td>${res.initial_balance_updated ? "sì" : "no"}</td></tr>
+      </table>
+    `;
+  }
   setTimeout(() => host.classList.add("hidden"), 15000);
 }
 
@@ -770,7 +796,7 @@ async function renderLineChart() {
                 const sign = t.amount >= 0 ? "+" : "";
                 const time = extractTimeFromDesc(t.full_description || t.description || "");
                 const timeStr = time ? ` [${time}]` : "";
-                const desc = (t.full_description || t.description || "").slice(0, 80);
+                const desc = descOf(t).slice(0, 80);
                 const who = multiAccount ? `${t.holder_name}: ` : "";
                 lines.push(`  ${sign}${fmtEur(t.amount)}${timeStr} — ${who}${desc}`);
               }
@@ -993,7 +1019,7 @@ function renderDrillRows(rows, meta) {
     sum += Number(r.amount);
     const tr = document.createElement("tr");
     const amountCls = r.amount >= 0 ? "value-positive" : "value-negative";
-    const desc = r.full_description || r.description || "";
+    const desc = descOf(r);
     let actionsCell = "";
     if (isUncategorized) {
       actionsCell = `

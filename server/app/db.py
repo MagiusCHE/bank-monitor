@@ -28,21 +28,42 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 
 CREATE TABLE IF NOT EXISTS transactions (
-  id               INTEGER PRIMARY KEY,
-  account_id       INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  op_date          TEXT,
-  value_date       TEXT NOT NULL,
-  amount           REAL NOT NULL,
-  description      TEXT NOT NULL,
-  full_description TEXT,
-  status           TEXT NOT NULL,
-  seq              INTEGER NOT NULL,
-  dedup_hash       TEXT NOT NULL UNIQUE,
-  created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+  id                   INTEGER PRIMARY KEY,
+  account_id           INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  op_date              TEXT,
+  value_date           TEXT NOT NULL,
+  amount               REAL NOT NULL,
+  description          TEXT NOT NULL,
+  full_description     TEXT,
+  enriched_description TEXT,
+  status               TEXT NOT NULL,
+  seq                  INTEGER NOT NULL,
+  dedup_hash           TEXT NOT NULL UNIQUE,
+  created_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_tx_account_date   ON transactions(account_id, value_date);
 CREATE INDEX IF NOT EXISTS idx_tx_account_status ON transactions(account_id, status);
+CREATE INDEX IF NOT EXISTS idx_tx_amount_date    ON transactions(amount, value_date);
+
+CREATE TABLE IF NOT EXISTS paypal_ledger (
+  id                     INTEGER PRIMARY KEY,
+  tx_date                TEXT NOT NULL,
+  tx_time                TEXT,
+  merchant               TEXT NOT NULL,
+  type                   TEXT NOT NULL,
+  status                 TEXT NOT NULL,
+  amount                 REAL NOT NULL,
+  currency               TEXT NOT NULL,
+  paypal_tx_code         TEXT NOT NULL UNIQUE,
+  receipt_code           TEXT,
+  note                   TEXT,
+  matched_transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
+  created_at             TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_paypal_date_amount ON paypal_ledger(tx_date, amount);
+CREATE INDEX IF NOT EXISTS idx_paypal_matched     ON paypal_ledger(matched_transaction_id);
 
 CREATE TABLE IF NOT EXISTS tag_rules (
   id         INTEGER PRIMARY KEY,
@@ -86,9 +107,17 @@ def _connect() -> sqlite3.Connection:
 _conn = _connect()
 
 
+def _ensure_column(table: str, column: str, decl: str) -> None:
+    cols = {r["name"] for r in _conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        _conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def init_db() -> None:
     with _lock:
         _conn.executescript(SCHEMA)
+        # Migrazioni soft su DB preesistenti (CREATE TABLE IF NOT EXISTS non fa ALTER).
+        _ensure_column("transactions", "enriched_description", "TEXT")
         # Se il DB è nuovo (nessuna tag_rule), inserisco la seed iniziale.
         has_rules = _conn.execute("SELECT COUNT(*) AS n FROM tag_rules").fetchone()["n"] > 0
         has_groups = _conn.execute("SELECT COUNT(*) AS n FROM groups").fetchone()["n"] > 0
