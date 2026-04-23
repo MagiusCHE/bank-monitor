@@ -59,7 +59,7 @@ TAG_RULES: list[tuple[str, str, str, int]] = [
     ("Medico/Cliniche",         r"(?i)dentist|\bdott\.|dottore|ospedal|policlinic|\bclinic|casa\s*di\s*cura|laboratori|analisi|ambulator|pediatr|ortoped|fisioterap|ottic|dermatolog|\basl\b", "medico", 101),
 
     # Spesa / negozi generici
-    ("Supermercato",            r"(?i)\bconad\b|\blidl\b|esselunga|carrefour|eurospin|\btigre\b|\btodis\b|\bcoop\b|ipercoop|simply|\bpam\b|penny\s*market|\biper\b|supermercato|supermarket|\bmarket\b", "spesa", 110),
+    ("Supermercato",            r"(?i)\bconad\b|\blidl\b|esselunga|carrefour|eurospin|\btigre\b|\btodis\b|\bcoop\b|ipercoop|simply|\bpam\b|penny\s*market|\biper\b|supermercato|supermarket|\bmarket\b|\btedi\b", "spesa", 110),
     ("Abbigliamento",           r"(?i)intimissimi|zara|oviesse|upim|terranova|\bh\s*&\s*m\b|calzedonia|yamamay|tezenis|\boutlet\b", "abbigliamento", 115),
     ("Parrucchiere/Barbiere",   r"(?i)parrucchier|barbier", "barbiere", 116),
     ("Libreria",                r"(?i)mondadori|feltrinelli|libreria|bookstore|giunti\s*al\s*punto|cartolibreria|cartoleria", "libreria", 117),
@@ -69,6 +69,7 @@ TAG_RULES: list[tuple[str, str, str, int]] = [
     ("Elettronica",             r"(?i)elettron|unieuro|mediaworld|media\s*world|trony|expert|euronics|comet\b", "elettronica", 121),
     ("Calzature",               r"(?i)calzatur|bata\b|geox|foot\s*locker|pittarello|pittarosso|\bscarpe\b", "calzature", 122),
     ("Vivaio/Piante",           r"(?i)vivaio|florovivai|garden\s*center", "vivaio", 123),
+    ("Casalinghi/Detersivi",    r"(?i)tigot[àa]|acqua\s*e\s*sapone|dimeglio|casalingh|detersivi", "casalinghi", 124),
 
     # Bollette
     ("Telefonia",               r"(?i)fastweb|\btim\b|vodafone|wind\s*tre|iliad|tiscali|telecom\s*italia", "telefonia", 195),
@@ -100,7 +101,7 @@ GROUPS: list[tuple[str, str, int, list[str]]] = [
     ("Svago",                   "expense", 85,  ["cinema", "hotel", "sport-impianti", "sport-attrezzature"]),
     ("Mezzi",                   "expense", 90,  ["parcheggio", "carburante", "autostrada", "auto-servizi", "auto-tasse"]),
     ("Mediche",                 "expense", 100, ["farmacia", "medico"]),
-    ("Spesa",                   "expense", 110, ["spesa", "abbigliamento", "barbiere", "libreria", "profumeria", "vino", "ferramenta", "elettronica", "calzature", "vivaio"]),
+    ("Spesa",                   "expense", 110, ["spesa", "abbigliamento", "barbiere", "libreria", "profumeria", "vino", "ferramenta", "elettronica", "calzature", "vivaio", "casalinghi"]),
     ("Bonifici inviati",        "expense", 120, ["bonifico-out"]),
     ("Bollette",                "expense", 195, ["telefonia", "acqua", "tv"]),
     ("Prelievi ATM",            "expense", 200, ["prelievo"]),

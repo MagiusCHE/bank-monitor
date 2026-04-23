@@ -17,7 +17,8 @@ router = APIRouter()
 
 
 def _parse_ids(s: Optional[str]) -> Optional[list[int]]:
-    if not s:
+    # None = parametro assente (tutti i conti); "" = lista vuota esplicita (nessuno)
+    if s is None:
         return None
     try:
         return [int(x) for x in s.split(",") if x.strip()]
@@ -40,6 +41,9 @@ def list_transactions(
     limit: int = Query(500, ge=1, le=5000),
 ) -> list[dict]:
     ids = _parse_ids(accounts)
+    # Lista esplicitamente vuota = nessun conto -> risposta vuota
+    if ids is not None and len(ids) == 0:
+        return []
     where: list[str] = ["1=1"]
     args: list = []
     if ids:

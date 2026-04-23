@@ -13,7 +13,9 @@ router = APIRouter()
 
 
 def _parse_ids(s: Optional[str]) -> Optional[list[int]]:
-    if not s:
+    # None = parametro assente (server usa tutti i conti)
+    # "" (stringa vuota) = lista esplicitamente vuota (nessun conto)
+    if s is None:
         return None
     try:
         return [int(x) for x in s.split(",") if x.strip()]
@@ -31,6 +33,11 @@ def balance_series(
     date_to: Optional[str] = Query(None),
 ) -> dict:
     ids = _parse_ids(accounts)
+    # Lista esplicitamente vuota = nessun conto selezionato -> serie vuota
+    if ids is not None and len(ids) == 0:
+        if mode == "per-account":
+            return {"mode": "per-account", "accounts": []}
+        return {"mode": "cumulative", "accounts": [], "points": []}
 
     where = []
     args: list = []
@@ -79,15 +86,28 @@ def balance_series(
         for aid, info in accounts_info.items():
             running = float(info["initial_balance"] or 0.0)
             points: list[dict] = []
+            started = False  # ha emesso il primo punto (inizio range)?
+
             if info["initial_balance_date"]:
                 start_date = date.fromisoformat(info["initial_balance_date"])
-                points.append({"date": start_date.isoformat(), "balance": running})
+                # Emetti il saldo iniziale solo se cade dentro al range
+                if (df is None or start_date >= df) and (dt is None or start_date <= dt):
+                    points.append({"date": start_date.isoformat(), "balance": round(running, 2)})
+                    started = True
+
             for d_iso, delta in by_account.get(aid, []):
                 d = date.fromisoformat(d_iso)
                 running += delta
-                if (df and d < df) or (dt and d > dt):
+                if dt and d > dt:
+                    break
+                if df and d < df:
                     continue
+                # Primo punto dentro al range: ancoro la serie con il saldo "in quel momento"
+                if not started and df is not None:
+                    points.append({"date": df.isoformat(), "balance": round(running, 2)})
+                    started = True
                 points.append({"date": d_iso, "balance": round(running, 2)})
+
             result_accounts.append({
                 "account_id": aid,
                 "account_number": info["account_number"],

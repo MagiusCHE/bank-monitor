@@ -174,7 +174,7 @@ function extractTimeFromDesc(s) {
 }
 
 function txCacheKey(date) {
-  const ids = state.selectedIds.size > 0 && state.selectedIds.size < state.accounts.length
+  const ids = state.selectedIds.size < state.accounts.length
     ? [...state.selectedIds].sort().join(",") : "all";
   return `${date}|${ids}|${state.includeAuthorized ? 1 : 0}|${state.excludeTrading ? 1 : 0}`;
 }
@@ -184,7 +184,7 @@ function prefetchTransactions(date) {
   if (txCache.has(key) || txPending.has(key)) return;
   txPending.add(key);
   const params = new URLSearchParams({ date });
-  if (state.selectedIds.size > 0 && state.selectedIds.size < state.accounts.length) {
+  if (state.selectedIds.size < state.accounts.length) {
     params.set("accounts", [...state.selectedIds].join(","));
   }
   if (state.includeAuthorized) params.set("include_authorized", "true");
@@ -211,6 +211,48 @@ function openSettings() {
   $("#server-url-input").value = state.serverUrl;
   $("#test-connection-status").textContent = "";
   $("#settings-panel").classList.remove("hidden");
+  renderSettingsAccounts();
+}
+
+function renderSettingsAccounts() {
+  const tbody = $("#settings-accounts-table tbody");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  if (!state.accounts || state.accounts.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="hint">Nessun conto caricato</td></tr>';
+    return;
+  }
+  for (const a of state.accounts) {
+    const tr = document.createElement("tr");
+    const period = (a.first_tx && a.last_tx)
+      ? `${fmtItDate(a.first_tx)} → ${fmtItDate(a.last_tx)}`
+      : "-";
+    tr.innerHTML = `
+      <td>${escHtml(a.holder_name)}</td>
+      <td>${escHtml(a.account_number)}</td>
+      <td>${a.transaction_count}</td>
+      <td class="date-col">${period}</td>
+      <td>
+        <button class="icon-btn danger" title="Elimina conto" aria-label="Elimina">${TRASH_ICON}</button>
+      </td>
+    `;
+    tr.querySelector("button").onclick = async () => {
+      const msg = `Eliminare il conto ${a.account_number} (${a.holder_name})?\n\n` +
+                  `Verranno cancellati DEFINITIVAMENTE ${a.transaction_count} movimenti dal server.\n` +
+                  `Questa operazione non può essere annullata.`;
+      if (!confirm(msg)) return;
+      try {
+        await apiDelete(`/api/accounts/${a.id}`);
+        state.selectedIds.delete(a.id);
+        setStatus(`Conto ${a.account_number} eliminato`, "ok");
+        await refreshAll();
+        renderSettingsAccounts();
+      } catch (err) {
+        setStatus("Errore eliminazione: " + err.message, "err");
+      }
+    };
+    tbody.appendChild(tr);
+  }
 }
 
 function closeSettings() {
@@ -311,24 +353,6 @@ function renderAccountPicker() {
     label.textContent = `${a.holder_name} (${a.account_number})`;
     chip.appendChild(label);
 
-    const del = document.createElement("span");
-    del.className = "del";
-    del.innerHTML = TRASH_ICON;
-    del.title = "Elimina conto";
-    del.onclick = async (e) => {
-      e.stopPropagation();
-      if (!confirm(`Eliminare il conto ${a.account_number} (${a.holder_name}) e tutti i suoi movimenti?`)) return;
-      try {
-        await apiDelete(`/api/accounts/${a.id}`);
-        state.selectedIds.delete(a.id);
-        setStatus("Conto eliminato", "ok");
-        await refreshAll();
-      } catch (err) {
-        setStatus("Errore eliminazione: " + err.message, "err");
-      }
-    };
-    chip.appendChild(del);
-
     chip.onclick = () => {
       if (state.selectedIds.has(a.id)) state.selectedIds.delete(a.id);
       else state.selectedIds.add(a.id);
@@ -392,7 +416,9 @@ function showUploadResult(res) {
 // -------- Chart --------
 function queryArgs() {
   const params = new URLSearchParams();
-  if (state.selectedIds.size > 0 && state.selectedIds.size < state.accounts.length) {
+  // Se l'utente ha deselezionato alcuni (o tutti) i conti passo la lista esatta.
+  // Omesso solo quando TUTTI i conti sono selezionati (server default = tutti).
+  if (state.selectedIds.size < state.accounts.length) {
     params.set("accounts", [...state.selectedIds].join(","));
   }
   if (state.includeAuthorized) params.set("include_authorized", "true");
@@ -524,6 +550,10 @@ async function renderLineChart() {
   if (last) {
     const note = state.excludeTrading ? " — escluse compravendite titoli" : "";
     setStatus(`Saldo al ${last.date}: ${fmtEur(last.balance)}${note}`, "ok");
+  } else if (state.selectedIds.size === 0) {
+    setStatus("Nessun conto selezionato", "warn");
+  } else {
+    setStatus("Nessun dato nel periodo selezionato", "warn");
   }
 }
 
@@ -624,7 +654,13 @@ async function renderBarChart() {
     },
   });
   $("#main-chart").style.cursor = "pointer";
-  setStatus(`${visible.length} gruppi attivi${data.uncategorized.count ? `, ${data.uncategorized.count} non classificati` : ""}`, "ok");
+  if (state.selectedIds.size === 0) {
+    setStatus("Nessun conto selezionato", "warn");
+  } else if (visible.length === 0 && data.uncategorized.count === 0) {
+    setStatus("Nessun dato nel periodo selezionato", "warn");
+  } else {
+    setStatus(`${visible.length} gruppi attivi${data.uncategorized.count ? `, ${data.uncategorized.count} non classificati` : ""}`, "ok");
+  }
 }
 
 function destroyChart() {
@@ -670,7 +706,7 @@ async function openDrill(meta) {
   params.set("group_id", String(meta.id));
   if (meta.uncategorized_kind) params.set("uncategorized_kind", meta.uncategorized_kind);
   params.set("limit", "2000");
-  if (state.selectedIds.size > 0 && state.selectedIds.size < state.accounts.length) {
+  if (state.selectedIds.size < state.accounts.length) {
     params.set("accounts", [...state.selectedIds].join(","));
   }
   if (state.includeAuthorized) params.set("include_authorized", "true");
@@ -954,7 +990,7 @@ async function resetSeed() {
 async function loadUntagged() {
   if (!state.serverUrl) return;
   const params = new URLSearchParams({ untagged: "true", limit: "2000" });
-  if (state.selectedIds.size > 0 && state.selectedIds.size < state.accounts.length) {
+  if (state.selectedIds.size < state.accounts.length) {
     params.set("accounts", [...state.selectedIds].join(","));
   }
   if (state.includeAuthorized) params.set("include_authorized", "true");

@@ -195,7 +195,8 @@ def reset_seed() -> dict:
 # ---------- Statistiche per gruppo (bar chart) ----------
 
 def _parse_ids(s: Optional[str]) -> Optional[list[int]]:
-    if not s:
+    # None = parametro assente (tutti i conti); "" = lista vuota esplicita (nessuno)
+    if s is None:
         return None
     try:
         return [int(x) for x in s.split(",") if x.strip()]
@@ -212,6 +213,21 @@ def group_stats(
     date_to: Optional[str] = Query(None),
 ) -> dict:
     ids = _parse_ids(accounts)
+    # Lista esplicitamente vuota = nessun conto -> stats vuote ma comunque con lista gruppi
+    if ids is not None and len(ids) == 0:
+        groups = compiled_groups()
+        return {
+            "groups": [
+                {"id": g["id"], "name": g["name"], "kind": g["kind"], "tags": sorted(gtags),
+                 "count": 0, "total": 0.0,
+                 "income_total": 0.0, "expense_abs_total": 0.0,
+                 "income_count": 0, "expense_count": 0}
+                for g, gtags in groups
+            ],
+            "uncategorized": {"count": 0, "total": 0.0},
+            "uncategorized_income": {"count": 0, "total": 0.0},
+            "uncategorized_expense": {"count": 0, "total": 0.0},
+        }
 
     where = ["1=1"]
     args: list = []

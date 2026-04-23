@@ -518,6 +518,25 @@ input[type=text]:focus, input[type=date]:focus, select:focus {
 
 .dirty { border-left: 3px solid var(--warning) !important; }
 
+#settings-accounts-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  margin-top: 4px;
+}
+#settings-accounts-table th, #settings-accounts-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: middle;
+}
+#settings-accounts-table th {
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-size: 0.82rem;
+}
+#settings-accounts-table td:last-child { text-align: right; }
+
 #upload-result table {
   width: 100%;
   border-collapse: collapse;
