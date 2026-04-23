@@ -9,9 +9,12 @@
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
 <body>
+  <div id="busy-overlay" class="hidden" aria-hidden="true">
+    <div class="busy-spinner" role="status" aria-label="Caricamento in corso"></div>
+  </div>
   <div id="app">
     <header>
-      <h1>Bank Monitor</h1>
+      <h1>Bank Monitor<span id="app-version-header" class="app-version"></span></h1>
       <nav class="view-tabs">
         <button class="view-tab active" data-view="cumulative">Cumulativa</button>
         <button class="view-tab" data-view="per-account">Per conto</button>

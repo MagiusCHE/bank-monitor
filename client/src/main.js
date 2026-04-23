@@ -33,12 +33,45 @@ const RESET_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="1
 const txCache = new Map(); // key = `${date}|${accountsCsv}|${includeAuth}` -> [transactions]
 const txPending = new Set(); // richieste in corso
 
+// -------- Busy overlay (loader) --------
+// Contatore di operazioni async in corso. Se > 0 per più di 1s, mostriamo
+// l'overlay globale che blocca l'interazione. Quando torna a 0 lo nascondiamo.
+const busy = { count: 0, timer: null };
+const BUSY_SHOW_DELAY_MS = 1000;
+
+function showBusyOverlay() {
+  const el = document.getElementById("busy-overlay");
+  if (el) el.classList.remove("hidden");
+}
+function hideBusyOverlay() {
+  const el = document.getElementById("busy-overlay");
+  if (el) el.classList.add("hidden");
+}
+function busyStart() {
+  busy.count += 1;
+  if (busy.count === 1 && !busy.timer) {
+    busy.timer = setTimeout(() => { busy.timer = null; if (busy.count > 0) showBusyOverlay(); }, BUSY_SHOW_DELAY_MS);
+  }
+}
+function busyEnd() {
+  busy.count = Math.max(0, busy.count - 1);
+  if (busy.count === 0) {
+    if (busy.timer) { clearTimeout(busy.timer); busy.timer = null; }
+    hideBusyOverlay();
+  }
+}
+// Wrappa una promise per conteggiare busy. Garantisce decremento anche su errore.
+function trackBusy(promise) {
+  busyStart();
+  return promise.finally(busyEnd);
+}
+
 // -------- Tauri bindings (con fallback per browser puro) --------
 const hasTauri = typeof window.__TAURI__ !== "undefined";
 
 async function tauriInvoke(cmd, args) {
   if (!hasTauri) return null;
-  return await window.__TAURI__.core.invoke(cmd, args || {});
+  return await trackBusy(window.__TAURI__.core.invoke(cmd, args || {}));
 }
 
 async function tauriDialogOpen(options) {
@@ -54,9 +87,10 @@ async function applyAppVersion() {
     try { version = await window.__TAURI__.app.getVersion(); } catch { /* ignore */ }
   }
   const suffix = version ? ` v${version}` : "";
-  document.title = `Bank Monitor${suffix}`;
-  const el = document.getElementById("app-version");
-  if (el) el.textContent = suffix;
+  for (const id of ["app-version", "app-version-header"]) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = suffix;
+  }
 }
 
 // -------- Tema --------
@@ -129,43 +163,58 @@ function apiUrl(path) {
   return base + path;
 }
 
-async function apiGet(path) {
-  const r = await fetch(apiUrl(path), { method: "GET" });
+// Cache GET: le risposte delle GET sono idempotenti fintanto che i filtri e
+// la config server non cambiano. Key = path completo (include i query string).
+// Invalidata esplicitamente al cambio filtri e dopo ogni scrittura.
+const apiCache = new Map();
+function invalidateApiCache() { apiCache.clear(); }
+
+// Wrapper comune: ogni chiamata HTTP è conteggiata dal busy tracker.
+async function apiFetch(path, init) {
+  const r = await trackBusy(fetch(apiUrl(path), init));
   if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
   return await r.json();
 }
 
+async function apiGet(path) {
+  if (apiCache.has(path)) return apiCache.get(path);
+  const data = await apiFetch(path, { method: "GET" });
+  apiCache.set(path, data);
+  return data;
+}
+
 async function apiPost(path, body) {
-  const r = await fetch(apiUrl(path), {
+  const data = await apiFetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
-  return await r.json();
+  invalidateApiCache();
+  return data;
 }
 
 async function apiDelete(path) {
-  const r = await fetch(apiUrl(path), { method: "DELETE" });
-  if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
-  return await r.json();
+  const data = await apiFetch(path, { method: "DELETE" });
+  invalidateApiCache();
+  return data;
 }
 
 async function apiPut(path, body) {
-  const r = await fetch(apiUrl(path), {
+  const data = await apiFetch(path, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
-  return await r.json();
+  invalidateApiCache();
+  return data;
 }
 
 async function apiUpload(file) {
   const fd = new FormData();
   fd.append("file", file);
-  const r = await fetch(apiUrl("/api/upload"), { method: "POST", body: fd });
+  const r = await trackBusy(fetch(apiUrl("/api/upload"), { method: "POST", body: fd }));
   if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
+  invalidateApiCache();
   return await r.json();
 }
 
@@ -403,6 +452,7 @@ function renderAccountPicker() {
       if (state.selectedIds.has(a.id)) state.selectedIds.delete(a.id);
       else state.selectedIds.add(a.id);
       txCache.clear();
+      invalidateApiCache();
       renderAccountPicker();
       syncDateInputs();
       refreshChart();
@@ -1576,12 +1626,12 @@ async function init() {
   $("#test-connection-btn").onclick = testConnection;
   $("#ai-mode-select").onchange = updateAiFieldsVisibility;
   $("#theme-toggle").onclick = cycleTheme;
-  $("#refresh-btn").onclick = refreshAll;
-  $("#include-authorized").onchange = (e) => { state.includeAuthorized = e.target.checked; txCache.clear(); refreshChart(); };
-  $("#exclude-trading").onchange = (e) => { state.excludeTrading = e.target.checked; txCache.clear(); refreshChart(); };
+  $("#refresh-btn").onclick = () => { invalidateApiCache(); txCache.clear(); refreshAll(); };
+  $("#include-authorized").onchange = (e) => { state.includeAuthorized = e.target.checked; txCache.clear(); invalidateApiCache(); refreshChart(); };
+  $("#exclude-trading").onchange = (e) => { state.excludeTrading = e.target.checked; txCache.clear(); invalidateApiCache(); refreshChart(); };
   $("#exclude-trading").checked = state.excludeTrading;
-  $("#date-from").onchange = (e) => { state.dateFrom = e.target.value; refreshChart(); };
-  $("#date-to").onchange = (e) => { state.dateTo = e.target.value; refreshChart(); };
+  $("#date-from").onchange = (e) => { state.dateFrom = e.target.value; invalidateApiCache(); refreshChart(); };
+  $("#date-to").onchange = (e) => { state.dateTo = e.target.value; invalidateApiCache(); refreshChart(); };
   $("#drill-close").onclick = closeDrill;
   $("#add-rule-btn").onclick = addRuleRow;
   $("#save-rules-btn").onclick = saveRules;
@@ -1589,6 +1639,7 @@ async function init() {
   $("#save-groups-btn").onclick = saveGroups;
   $("#reset-seed-btn").onclick = resetSeed;
   $("#reload-config-btn").onclick = async () => {
+    invalidateApiCache();
     await reloadServerConfig();
     await refreshChart();
     setStatus("Configurazione ricaricata dal server", "ok");
