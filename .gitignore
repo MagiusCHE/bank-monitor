@@ -14,3 +14,19 @@ Thumbs.db
 # File di test locale non committabili
 /movements_*.xlsx
 /server/data/
+
+# Tauri build
+client/node_modules/
+client/src-tauri/target/
+client/src-tauri/gen/
+
+# Environment / secrets
+.env
+.env.*
+!.env.*.example
+
+# Keystore Android
+*.jks
+
+# Release locale (dry-run)
+release-dry-run/

@@ -5,7 +5,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from .. import db
-from ..filters import trading_exclusion_clause
+from ..filters import trading_exclusion_clause, trading_inclusion_clause
 from ..services.grouping import (
     compiled_groups,
     compiled_tag_rules,
@@ -101,6 +101,49 @@ def list_transactions(
 
         out.append(d)
     return out
+
+
+@router.get("/trading-transactions")
+def trading_transactions(
+    accounts: Optional[str] = Query(None),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    include_authorized: bool = Query(False),
+) -> list[dict]:
+    """Ritorna TUTTE le righe di trading (compravendita titoli, dividendi, cedole,
+    rimborsi titoli, ritenute, bolli dossier) nel range, ordinate per value_date.
+    Il client fa il lot-matching FIFO per calcolare il P&L realizzato."""
+    ids = _parse_ids(accounts)
+    if ids is not None and len(ids) == 0:
+        return []
+
+    where: list[str] = ["1=1"]
+    args: list = []
+    if ids:
+        where.append(f"account_id IN ({','.join('?' for _ in ids)})")
+        args.extend(ids)
+    if date_from:
+        where.append("value_date >= ?")
+        args.append(date_from)
+    if date_to:
+        where.append("value_date <= ?")
+        args.append(date_to)
+    if not include_authorized:
+        where.append("(status IS NULL OR status != 'Autorizzato')")
+
+    clause, clause_args = trading_inclusion_clause(
+        desc_col="description", full_col="full_description"
+    )
+    where.append(clause)
+    args.extend(clause_args)
+
+    rows = db.conn().execute(
+        "SELECT id, value_date, amount, description, full_description "
+        "FROM transactions WHERE " + " AND ".join(where) +
+        " ORDER BY value_date, id",
+        args,
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 @router.get("/accounts")

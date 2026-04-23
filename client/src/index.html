@@ -42,6 +42,38 @@
         <button id="close-settings-btn">Chiudi</button>
       </div>
 
+      <h3>Assistente AI</h3>
+      <p class="hint">Usato dal pulsante "Suggerisci tag" nei movimenti non classificati. Le chiavi API restano sul tuo PC in <code>~/.config/bank-monitor/config.json</code>.</p>
+      <div class="setting-row">
+        <label for="ai-mode-select">Provider</label>
+        <select id="ai-mode-select">
+          <option value="claude-cli">Claude CLI locale</option>
+          <option value="claude-api">Claude API (HTTP)</option>
+          <option value="codex-cli">Codex CLI locale</option>
+          <option value="openai-api">OpenAI API (HTTP)</option>
+        </select>
+      </div>
+      <div class="setting-row ai-field" id="ai-claude-model-row">
+        <label for="ai-claude-model">Modello Claude</label>
+        <select id="ai-claude-model">
+          <option value="sonnet">Sonnet (rapido)</option>
+          <option value="opus">Opus (più accurato)</option>
+          <option value="haiku">Haiku (molto rapido)</option>
+        </select>
+      </div>
+      <div class="setting-row ai-field" id="ai-openai-model-row">
+        <label for="ai-openai-model">Modello OpenAI</label>
+        <input type="text" id="ai-openai-model" placeholder="gpt-4o" spellcheck="false">
+      </div>
+      <div class="setting-row ai-field" id="ai-anthropic-key-row">
+        <label for="ai-anthropic-key">API key Anthropic</label>
+        <input type="password" id="ai-anthropic-key" placeholder="sk-ant-..." spellcheck="false" autocomplete="off">
+      </div>
+      <div class="setting-row ai-field" id="ai-openai-key-row">
+        <label for="ai-openai-key">API key OpenAI</label>
+        <input type="password" id="ai-openai-key" placeholder="sk-..." spellcheck="false" autocomplete="off">
+      </div>
+
       <h3>Conti caricati</h3>
       <p class="hint">Eliminare un conto cancella definitivamente tutti i suoi movimenti dal server.</p>
       <table id="settings-accounts-table">
@@ -65,7 +97,7 @@
           <input type="checkbox" id="include-authorized"> Includi movimenti autorizzati
         </label>
         <label title="Esclude compravendite titoli, dividendi, cedole — le vedi nella vista Gruppi">
-          <input type="checkbox" id="exclude-trading" checked> Escludi compravendite/titoli
+          <input type="checkbox" id="exclude-trading" checked> Escludi trading
         </label>
         <span class="flex-spacer"></span>
         <label>Da <input type="date" id="date-from"></label>
@@ -79,7 +111,10 @@
     </section>
 
     <!-- Stato / messaggi -->
-    <div id="status-msg" class="status-msg"></div>
+    <div class="status-bar">
+      <div id="status-msg" class="status-msg"></div>
+      <span id="trading-pnl" class="trading-pnl hidden" title="Profit & Loss complessivo delle operazioni di trading (compravendita titoli, dividendi, cedole, rimborsi titoli) nel periodo e conti selezionati"></span>
+    </div>
 
     <!-- Contenitore grafico -->
     <section id="chart-section" class="panel hidden">
@@ -103,6 +138,7 @@
               <th>Descrizione</th>
               <th class="amount-col">Importo</th>
               <th>Stato</th>
+              <th style="width:160px" class="drill-actions-col hidden">Azioni</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -167,27 +203,6 @@
         </table>
       </details>
 
-      <!-- Sezione Non classificate -->
-      <details class="config-section" id="section-untagged">
-        <summary>
-          Movimenti non taggati
-          <span class="badge" id="untagged-count">-</span>
-        </summary>
-        <p class="hint">Movimenti a cui nessuna regola assegna un tag. Aggiungi una regola per classificarli.</p>
-        <div class="drill-table-wrapper">
-          <table id="untagged-table">
-            <thead>
-              <tr>
-                <th>Data valuta</th>
-                <th>Conto</th>
-                <th>Descrizione</th>
-                <th class="amount-col">Importo</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </details>
     </section>
 
     <!-- Info upload -->

@@ -29,3 +29,19 @@ def trading_exclusion_clause(
         parts.append(f"LOWER(COALESCE({full_col}, '')) NOT LIKE ?")
         args.append(f"%{kw}%")
     return "(" + " AND ".join(parts) + ")", args
+
+
+def trading_inclusion_clause(
+    desc_col: str = "t.description",
+    full_col: str = "t.full_description",
+) -> tuple[str, list]:
+    """Ritorna (sql_fragment, args) da AND-are in una WHERE per includere SOLO le
+    transazioni di trading (opposto di trading_exclusion_clause)."""
+    parts: list[str] = []
+    args: list = []
+    for kw in _TRADING_KEYWORDS:
+        parts.append(f"LOWER(COALESCE({desc_col}, '')) LIKE ?")
+        args.append(f"%{kw}%")
+        parts.append(f"LOWER(COALESCE({full_col}, '')) LIKE ?")
+        args.append(f"%{kw}%")
+    return "(" + " OR ".join(parts) + ")", args

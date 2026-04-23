@@ -18,6 +18,12 @@ const state = {
   rulesDirty: false,
   groupsDirty: false,
   theme: "system",
+  // AI
+  aiMode: "claude-cli",
+  anthropicApiKey: "",
+  openaiApiKey: "",
+  claudeModel: "sonnet",
+  openaiModel: "gpt-4o",
 };
 
 let chart = null;
@@ -72,6 +78,11 @@ async function loadConfig() {
       if (cfg) {
         state.serverUrl = cfg.server_url || "";
         theme = cfg.theme || "system";
+        state.aiMode = cfg.ai_mode || "claude-cli";
+        state.anthropicApiKey = cfg.anthropic_api_key || "";
+        state.openaiApiKey = cfg.openai_api_key || "";
+        state.claudeModel = cfg.claude_model || "sonnet";
+        state.openaiModel = cfg.openai_model || "gpt-4o";
         applyTheme(theme);
         return;
       }
@@ -88,6 +99,11 @@ async function saveConfig() {
       await tauriInvoke("set_config", {
         serverUrl: state.serverUrl,
         theme: state.theme || "system",
+        aiMode: state.aiMode || "claude-cli",
+        anthropicApiKey: state.anthropicApiKey || "",
+        openaiApiKey: state.openaiApiKey || "",
+        claudeModel: state.claudeModel || "sonnet",
+        openaiModel: state.openaiModel || "gpt-4o",
       });
       return;
     } catch (e) { console.warn("set_config:", e); }
@@ -210,8 +226,22 @@ function getCachedTransactions(date) {
 function openSettings() {
   $("#server-url-input").value = state.serverUrl;
   $("#test-connection-status").textContent = "";
+  $("#ai-mode-select").value = state.aiMode || "claude-cli";
+  $("#ai-claude-model").value = state.claudeModel || "sonnet";
+  $("#ai-openai-model").value = state.openaiModel || "gpt-4o";
+  $("#ai-anthropic-key").value = state.anthropicApiKey || "";
+  $("#ai-openai-key").value = state.openaiApiKey || "";
+  updateAiFieldsVisibility();
   $("#settings-panel").classList.remove("hidden");
   renderSettingsAccounts();
+}
+
+function updateAiFieldsVisibility() {
+  const mode = $("#ai-mode-select").value;
+  $("#ai-claude-model-row").classList.toggle("hidden", mode !== "claude-cli" && mode !== "claude-api");
+  $("#ai-openai-model-row").classList.toggle("hidden", mode !== "codex-cli" && mode !== "openai-api");
+  $("#ai-anthropic-key-row").classList.toggle("hidden", mode !== "claude-api");
+  $("#ai-openai-key-row").classList.toggle("hidden", mode !== "openai-api");
 }
 
 function renderSettingsAccounts() {
@@ -283,6 +313,11 @@ async function testConnection() {
 async function saveSettings() {
   const url = $("#server-url-input").value.trim();
   state.serverUrl = url;
+  state.aiMode = $("#ai-mode-select").value;
+  state.claudeModel = $("#ai-claude-model").value;
+  state.openaiModel = $("#ai-openai-model").value.trim() || "gpt-4o";
+  state.anthropicApiKey = $("#ai-anthropic-key").value.trim();
+  state.openaiApiKey = $("#ai-openai-key").value.trim();
   await saveConfig();
   closeSettings();
   await refreshAll();
@@ -433,12 +468,13 @@ async function refreshChart() {
   if (!state.serverUrl) { showChart(false); return; }
   if (state.accounts.length === 0) { showChart(false); return; }
 
+  // P&L trading in parallelo al render del grafico
+  refreshTradingPnl();
+
   // Vista "groups" mostra il pannello CRUD gruppi + bar chart dei gruppi
   if (state.view === "groups") {
     $("#groups-panel").classList.remove("hidden");
     await renderBarChart();
-    // Se la sezione "non classificate" è aperta la aggiorno coi filtri correnti
-    if ($("#section-untagged").open) loadUntagged();
     return;
   } else {
     $("#groups-panel").classList.add("hidden");
@@ -446,6 +482,146 @@ async function refreshChart() {
   }
 
   await renderLineChart();
+}
+
+// Parse una riga "Compravendita Titoli BTP-1OT54 4,3% Qta/Val.nom. 10000,000000"
+// estraendo ticker e quantità. Ritorna {ticker, qty} o null se non parsabile.
+function parseTradingRow(row) {
+  const desc = (row.full_description || row.description || "");
+  // Ticker: prima sequenza MAIUSCOLE-TRATTINO-ALFANUMERICI (es. BTP-1OT54, BTP-1ST49)
+  const mTicker = desc.match(/\b([A-Z]{2,}-[0-9A-Z]+)\b/);
+  // Quantità: "Qta/Val.nom. 10000,000000" oppure "su 10.000,000 BTP-..."
+  const mQtyA = desc.match(/Qta\/Val\.nom\.\s+([\d\.]+,\d+|\d+)/i);
+  const mQtyB = desc.match(/su\s+([\d\.]+,\d+|\d+)\s+[A-Z]/i);
+  const qtyStr = (mQtyA && mQtyA[1]) || (mQtyB && mQtyB[1]) || null;
+  let qty = null;
+  if (qtyStr) {
+    // Formato italiano: "10.000,000000" → 10000.0
+    qty = Number(qtyStr.replace(/\./g, "").replace(",", "."));
+    if (!isFinite(qty)) qty = null;
+  }
+  return { ticker: mTicker ? mTicker[1] : null, qty };
+}
+
+// Classifica la riga trading: "buy-sell" | "coupon" | "fee" | "other".
+// "coupon" = cedole, dividendi, ritenute, rimborsi titoli (sempre realizzati).
+// "fee" = bolli dossier (sempre realizzati, costi certi).
+function classifyTradingRow(row) {
+  const desc = (row.description || "").toLowerCase();
+  const full = (row.full_description || "").toLowerCase();
+  const blob = desc + " " + full;
+  if (/cedol|dividend|rimborso\s*titoli/.test(blob)) return "coupon";
+  if (/bollo|imposta|ritenuta/.test(blob)) return "fee";
+  if (/compravendita/.test(blob)) return "buy-sell";
+  return "other";
+}
+
+// FIFO lot matching per calcolare P&L realizzato.
+// Ritorna {realized, open_invested, coupons, fees, other, count}.
+function computeTradingPnl(rows) {
+  const lots = new Map();  // ticker -> [{qty, cost}] (cost positivo)
+  let realized = 0;
+  let coupons = 0;
+  let fees = 0;
+  let other = 0;
+
+  for (const r of rows) {
+    const amount = Number(r.amount);
+    const kind = classifyTradingRow(r);
+    if (kind === "coupon") { coupons += amount; continue; }
+    if (kind === "fee") { fees += amount; continue; }
+    if (kind !== "buy-sell") { other += amount; continue; }
+
+    const { ticker, qty } = parseTradingRow(r);
+    if (!ticker || !qty || qty <= 0) {
+      // Non parsabile: lo sommo al residuo per non nascondere nulla
+      other += amount;
+      continue;
+    }
+    const queue = lots.get(ticker) || [];
+    if (amount < 0) {
+      // Acquisto: apro un lotto
+      queue.push({ qty, cost: -amount });
+      lots.set(ticker, queue);
+    } else {
+      // Vendita: chiudo FIFO
+      let remaining = qty;
+      let proceeds = amount; // totale incassato dalla vendita
+      while (remaining > 1e-9 && queue.length > 0) {
+        const lot = queue[0];
+        const used = Math.min(lot.qty, remaining);
+        const lotCostFraction = lot.cost * (used / lot.qty);
+        const proceedsFraction = proceeds * (used / qty);
+        realized += proceedsFraction - lotCostFraction;
+        lot.qty -= used;
+        lot.cost -= lotCostFraction;
+        remaining -= used;
+        if (lot.qty <= 1e-9) queue.shift();
+      }
+      if (remaining > 1e-9) {
+        // Vendita scoperta (non dovrebbe accadere): il resto va in realized
+        realized += proceeds * (remaining / qty);
+      }
+    }
+  }
+
+  // Capitale ancora investito (somma dei cost residui di tutti i lot aperti)
+  let open_invested = 0;
+  for (const queue of lots.values()) {
+    for (const lot of queue) open_invested += lot.cost;
+  }
+
+  return {
+    realized: round2(realized + coupons + fees + other),
+    realized_core: round2(realized),
+    coupons: round2(coupons),
+    fees: round2(fees),
+    other: round2(other),
+    open_invested: round2(open_invested),
+    count: rows.length,
+  };
+}
+
+function round2(n) { return Math.round(n * 100) / 100; }
+
+async function refreshTradingPnl() {
+  const el = $("#trading-pnl");
+  if (!el) return;
+  if (!state.serverUrl || state.accounts.length === 0 || state.selectedIds.size === 0) {
+    el.classList.add("hidden");
+    return;
+  }
+  const params = new URLSearchParams();
+  if (state.selectedIds.size < state.accounts.length) {
+    params.set("accounts", [...state.selectedIds].join(","));
+  }
+  if (state.includeAuthorized) params.set("include_authorized", "true");
+  if (state.dateFrom) params.set("date_from", state.dateFrom);
+  if (state.dateTo) params.set("date_to", state.dateTo);
+  const q = params.toString();
+  try {
+    const rows = await apiGet(`/api/trading-transactions${q ? "?" + q : ""}`);
+    if (!rows.length) {
+      el.classList.add("hidden");
+      return;
+    }
+    const pnl = computeTradingPnl(rows);
+    const cls = pnl.realized >= 0 ? "value-positive" : "value-negative";
+    const sign = pnl.realized >= 0 ? "+" : "";
+    el.className = `trading-pnl ${cls}`;
+    const investedNote = pnl.open_invested > 0
+      ? ` <span class="hint">· ${fmtEur(pnl.open_invested)} ancora investito</span>`
+      : "";
+    el.innerHTML = `Trading P&amp;L: <strong>${sign}${fmtEur(pnl.realized)}</strong> <span class="hint">(${pnl.count} mov.)</span>${investedNote}`;
+    el.title = `Realizzato: ${fmtEur(pnl.realized)}\n` +
+               `  • Compra/vendi chiuse: ${fmtEur(pnl.realized_core)}\n` +
+               `  • Cedole/dividendi: ${fmtEur(pnl.coupons)}\n` +
+               `  • Bolli/imposte: ${fmtEur(pnl.fees)}\n` +
+               (pnl.other ? `  • Altre: ${fmtEur(pnl.other)}\n` : "") +
+               `Capitale ancora investito (non conteggiato): ${fmtEur(pnl.open_invested)}`;
+  } catch (e) {
+    el.classList.add("hidden");
+  }
 }
 
 function showChart(visible) {
@@ -527,13 +703,15 @@ async function renderLineChart() {
               }
               if (txs.length === 0) return ["", "Nessun movimento in questa data"];
               const lines = ["", `Movimenti (${txs.length}):`];
+              const multiAccount = state.selectedIds.size > 1;
               const maxShow = 8;
               for (const t of txs.slice(0, maxShow)) {
                 const sign = t.amount >= 0 ? "+" : "";
                 const time = extractTimeFromDesc(t.full_description || t.description || "");
                 const timeStr = time ? ` [${time}]` : "";
                 const desc = (t.full_description || t.description || "").slice(0, 80);
-                lines.push(`  ${sign}${fmtEur(t.amount)}${timeStr} — ${desc}`);
+                const who = multiAccount ? `${t.holder_name}: ` : "";
+                lines.push(`  ${sign}${fmtEur(t.amount)}${timeStr} — ${who}${desc}`);
               }
               if (txs.length > maxShow) lines.push(`  … e altri ${txs.length - maxShow}`);
               return lines;
@@ -544,12 +722,27 @@ async function renderLineChart() {
     },
   });
 
-  const last = data.mode === "cumulative"
-    ? data.points[data.points.length - 1]
-    : data.accounts[0]?.points[data.accounts[0].points.length - 1];
-  if (last) {
+  let lastDate = null;
+  let lastBalance = null;
+  if (data.mode === "cumulative") {
+    const last = data.points[data.points.length - 1];
+    if (last) { lastDate = last.date; lastBalance = last.balance; }
+  } else {
+    // Somma gli ultimi saldi di ogni conto visibile; data = max tra le ultime di ogni conto
+    let total = 0;
+    let count = 0;
+    for (const a of data.accounts) {
+      const p = a.points[a.points.length - 1];
+      if (!p) continue;
+      total += Number(p.balance);
+      count += 1;
+      if (!lastDate || p.date > lastDate) lastDate = p.date;
+    }
+    if (count > 0) lastBalance = total;
+  }
+  if (lastDate != null && lastBalance != null) {
     const note = state.excludeTrading ? " — escluse compravendite titoli" : "";
-    setStatus(`Saldo al ${last.date}: ${fmtEur(last.balance)}${note}`, "ok");
+    setStatus(`Saldo al ${lastDate}: ${fmtEur(lastBalance)}${note}`, "ok");
   } else if (state.selectedIds.size === 0) {
     setStatus("Nessun conto selezionato", "warn");
   } else {
@@ -696,6 +889,7 @@ async function openDrill(meta) {
   const title = $("#drill-title");
   const summary = $("#drill-summary");
 
+  state.activeDrillMeta = meta;
   title.textContent = meta.name;
   summary.textContent = `${meta.count} movimenti · totale ${fmtEur(meta.total)} · caricamento…`;
   tbody.innerHTML = "";
@@ -728,20 +922,38 @@ async function openDrill(meta) {
 function renderDrillRows(rows, meta) {
   const tbody = $("#drill-table tbody");
   const summary = $("#drill-summary");
+  const actionsHeader = $(".drill-actions-col");
   tbody.innerHTML = "";
+  const isUncategorized = meta.id === 0;
+  if (actionsHeader) actionsHeader.classList.toggle("hidden", !isUncategorized);
+
   let sum = 0;
   for (const r of rows) {
     sum += Number(r.amount);
     const tr = document.createElement("tr");
     const amountCls = r.amount >= 0 ? "value-positive" : "value-negative";
     const desc = r.full_description || r.description || "";
+    let actionsCell = "";
+    if (isUncategorized) {
+      actionsCell = `
+        <td class="untagged-actions">
+          <button class="row-btn" data-act="tag" title="Aggiungi un tag a questo movimento">+ Tag</button>
+          <button class="row-btn row-btn-ai" data-act="ai" title="Chiedi all'AI di suggerire tag">✨ AI</button>
+        </td>
+      `;
+    }
     tr.innerHTML = `
       <td class="date-col">${fmtItDate(r.value_date)}</td>
       <td class="date-col">${escHtml(r.holder_name)} <span style="color:var(--text-secondary)">(${escHtml(r.account_number)})</span></td>
       <td class="desc-col">${escHtml(desc)}</td>
       <td class="amount-col ${amountCls}">${fmtEur(r.amount)}</td>
       <td class="date-col">${escHtml(r.status || "")}</td>
+      ${actionsCell}
     `;
+    if (isUncategorized) {
+      tr.querySelector('[data-act="tag"]').onclick = () => openTagDialog(tr, desc, null);
+      tr.querySelector('[data-act="ai"]').onclick = () => openAiSuggest(tr, desc, r.amount);
+    }
     tbody.appendChild(tr);
   }
   const showing = rows.length;
@@ -752,6 +964,7 @@ function renderDrillRows(rows, meta) {
 
 function closeDrill() {
   $("#drill-panel").classList.add("hidden");
+  state.activeDrillMeta = null;
 }
 
 // -------- Config (tag-rules + groups) --------
@@ -838,14 +1051,12 @@ function addRuleRow() {
 }
 
 async function saveRules() {
-  // Validazione client: regex compilabili
+  // Validazione client: solo campi obbligatori. La compilazione regex la fa
+  // il server (Python) — i pattern supportano costrutti come (?i) che JS non
+  // accetta, quindi new RegExp() qui darebbe falsi negativi.
   for (const r of state.rulesWorking) {
     if (!r.name || !r.pattern || !r.tag) {
       setStatus("Tutte le regole devono avere nome, regex e tag", "err");
-      return;
-    }
-    try { new RegExp(r.pattern); } catch (e) {
-      setStatus(`Regex non valida in "${r.name}": ${e.message}`, "err");
       return;
     }
   }
@@ -986,35 +1197,311 @@ async function resetSeed() {
   }
 }
 
-// --- Untagged view ---
-async function loadUntagged() {
-  if (!state.serverUrl) return;
-  const params = new URLSearchParams({ untagged: "true", limit: "2000" });
-  if (state.selectedIds.size < state.accounts.length) {
-    params.set("accounts", [...state.selectedIds].join(","));
+// Escape regex per usare una stringa come pattern letterale
+function escRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function removeRowPopover(tr) {
+  const existing = tr.querySelector(".row-popover-row");
+  if (existing) existing.remove();
+}
+
+function addPopoverRow(tr, content) {
+  removeRowPopover(tr);
+  const popRow = document.createElement("tr");
+  popRow.className = "row-popover-row";
+  const td = document.createElement("td");
+  td.colSpan = tr.children.length || 6;
+  td.className = "row-popover-cell";
+  td.appendChild(content);
+  popRow.appendChild(td);
+  tr.parentNode.insertBefore(popRow, tr.nextSibling);
+  return popRow;
+}
+
+// --- Dialog "+ Tag" con modalità di match: intera / parole / regex libera ---
+function openTagDialog(tr, fullDescription, presetTag) {
+  const box = document.createElement("div");
+  box.className = "row-popover";
+
+  const existingTags = collectAllKnownTags();
+  const datalistId = "tag-datalist-" + Math.random().toString(36).slice(2);
+  const radioName = "match-mode-" + Math.random().toString(36).slice(2);
+
+  box.innerHTML = `
+    <div class="row-popover-title">Crea regola di tagging</div>
+    <div class="row-popover-field">
+      <label>Tag</label>
+      <input type="text" class="tag-input" list="${datalistId}" placeholder="es. spesa" value="${escHtml(presetTag || "")}">
+      <datalist id="${datalistId}">
+        ${existingTags.map(t => `<option value="${escHtml(t)}"></option>`).join("")}
+      </datalist>
+    </div>
+    <div class="row-popover-field">
+      <label>Modalità di match</label>
+      <div class="match-mode-options">
+        <label class="row-popover-check"><input type="radio" name="${radioName}" value="full" checked> Descrizione intera</label>
+        <label class="row-popover-check"><input type="radio" name="${radioName}" value="words"> Parole (tutte obbligatorie, ordine libero)</label>
+        <label class="row-popover-check"><input type="radio" name="${radioName}" value="custom"> Regex libera</label>
+      </div>
+    </div>
+    <div class="row-popover-field words-field hidden">
+      <label>Parole (separate da virgola)</label>
+      <input type="text" class="words-input" spellcheck="false" placeholder="es. immobile, caparra">
+      <span class="hint">Uno spazio <em>dentro</em> una parola lo rende opzionale nel match: <code>i mmobile</code> accetta sia <code>immobile</code> sia <code>i mmobile</code> (utile per le descrizioni Fineco spezzate a larghezza fissa).</span>
+    </div>
+    <div class="row-popover-field">
+      <label>Pattern regex</label>
+      <input type="text" class="pattern-input" spellcheck="false">
+      <span class="hint pattern-hint"></span>
+    </div>
+    <div class="row-popover-actions">
+      <button class="primary confirm-btn">Salva regola</button>
+      <button class="cancel-btn">Annulla</button>
+    </div>
+    <div class="row-popover-status hint"></div>
+  `;
+
+  const tagInput = box.querySelector(".tag-input");
+  const patternInput = box.querySelector(".pattern-input");
+  const patternHint = box.querySelector(".pattern-hint");
+  const wordsField = box.querySelector(".words-field");
+  const wordsInput = box.querySelector(".words-input");
+  const radios = box.querySelectorAll(`input[name="${radioName}"]`);
+  const statusEl = box.querySelector(".row-popover-status");
+
+  function currentMode() {
+    for (const r of radios) if (r.checked) return r.value;
+    return "full";
   }
-  if (state.includeAuthorized) params.set("include_authorized", "true");
-  if (state.dateFrom) params.set("date_from", state.dateFrom);
-  if (state.dateTo) params.set("date_to", state.dateTo);
+
+  function buildWordsPattern(text) {
+    // Ogni item separato da virgola = una parola obbligatoria.
+    // Lo spazio DENTRO un item diventa \s? (spazio opzionale) per tollerare
+    // gli a-capo a larghezza fissa di Fineco.
+    const items = text.split(",").map(s => s.trim()).filter(Boolean);
+    if (items.length === 0) return "";
+    const parts = items.map(item => {
+      const tokens = item.split(/\s+/).filter(Boolean).map(escRegex);
+      const core = tokens.join("\\s?");
+      return `(?=.*\\b${core}\\b)`;
+    });
+    return "(?i)" + parts.join("") + ".*";
+  }
+
+  function updatePattern() {
+    const mode = currentMode();
+    wordsField.classList.toggle("hidden", mode !== "words");
+    if (mode === "full") {
+      patternInput.value = `(?i)^${escRegex(fullDescription)}$`;
+      patternInput.readOnly = true;
+      patternHint.textContent = "Match solo su questa descrizione esatta (case-insensitive).";
+    } else if (mode === "words") {
+      patternInput.value = buildWordsPattern(wordsInput.value);
+      patternInput.readOnly = true;
+      patternHint.textContent = "Tutte le parole devono essere presenti (ordine libero, case-insensitive).";
+    } else {
+      patternInput.readOnly = false;
+      patternHint.textContent = "Puoi modificare liberamente il pattern.";
+    }
+  }
+
+  // Inizializzo con parole pre-compilate dalla descrizione (prime 2-3 parole "forti")
+  const initialWords = extractCandidateWords(fullDescription);
+  wordsInput.value = initialWords.join(", ");
+  updatePattern();
+
+  radios.forEach(r => r.onchange = updatePattern);
+  wordsInput.oninput = () => {
+    if (currentMode() === "words") updatePattern();
+  };
+
+  box.querySelector(".cancel-btn").onclick = () => removeRowPopover(tr);
+  box.querySelector(".confirm-btn").onclick = async () => {
+    const tag = tagInput.value.trim();
+    const pattern = patternInput.value.trim();
+    if (!tag) { statusEl.textContent = "Il tag è obbligatorio"; return; }
+    if (!pattern) { statusEl.textContent = "Il pattern è obbligatorio"; return; }
+    statusEl.textContent = "Salvataggio...";
+    try {
+      await apiPost("/api/tag-rules", {
+        name: `auto: ${tag} - ${fullDescription.slice(0, 40)}`,
+        pattern,
+        tag,
+        priority: 0,
+      });
+      setStatus(`Regola creata: ${tag}`, "ok");
+      removeRowPopover(tr);
+      await reloadServerConfig();
+      // Ricarica il bar chart e, se aperto, il drill-down "non classificate"
+      await refreshChart();
+      if (state.activeDrillMeta && state.activeDrillMeta.id === 0) {
+        await openDrill(state.activeDrillMeta);
+      }
+    } catch (e) {
+      statusEl.textContent = "Errore: " + e.message;
+    }
+  };
+
+  addPopoverRow(tr, box);
+  tagInput.focus();
+}
+
+// Estrae parole "candidate" per il match (nomi merchant più probabili).
+// Euristica: parole di 4+ lettere che non sembrano codici/date/importi.
+function extractCandidateWords(desc) {
+  if (!desc) return [];
+  const tokens = desc.split(/\s+/);
+  const out = [];
+  for (const t of tokens) {
+    const w = t.replace(/[^\p{L}]/gu, ""); // solo lettere
+    if (w.length >= 4 && !/^\d/.test(t)) out.push(w.toLowerCase());
+    if (out.length >= 3) break;
+  }
+  return out;
+}
+
+function collectAllKnownTags() {
+  const s = new Set();
+  (state.rules || []).forEach(r => r.tag && s.add(r.tag));
+  (state.groups || []).forEach(g => (g.tags || []).forEach(t => s.add(t)));
+  return [...s].sort();
+}
+
+function collectGroupTags() {
+  const s = new Set();
+  (state.groups || []).forEach(g => (g.tags || []).forEach(t => s.add(t)));
+  return s;
+}
+
+// Crea al volo una regola tag con match esatto sulla descrizione.
+async function applyTagDirectly(tag, fullDescription) {
+  const pattern = `(?i)^${escRegex(fullDescription)}$`;
+  await apiPost("/api/tag-rules", {
+    name: `auto: ${tag} - ${fullDescription.slice(0, 40)}`,
+    pattern,
+    tag,
+    priority: 0,
+  });
+}
+
+// --- Suggerimento AI ---
+async function openAiSuggest(tr, fullDescription, amount) {
+  if (!hasTauri) {
+    alert("Suggerimenti AI disponibili solo nell'app desktop.");
+    return;
+  }
+  const box = document.createElement("div");
+  box.className = "row-popover";
+  box.innerHTML = `
+    <div class="row-popover-title">Suggerimenti AI per questo movimento</div>
+    <div class="ai-status hint">Chiedo all'AI (${escHtml(state.aiMode || "?")})...</div>
+    <div class="ai-suggestions hidden">
+      <div class="ai-group active-group hidden">
+        <div class="ai-group-label">Attivi <span class="hint">— già collegati a un gruppo, il movimento verrà classificato subito</span></div>
+        <div class="ai-chips active-chips"></div>
+      </div>
+      <hr class="ai-divider hidden">
+      <div class="ai-group orphan-group hidden">
+        <div class="ai-group-label">Da collegare <span class="hint">— tag non ancora presenti in un gruppo: il movimento resterà non classificato finché non li aggiungi</span></div>
+        <div class="ai-chips orphan-chips"></div>
+      </div>
+      <div class="ai-empty hint hidden">L'AI non ha trovato suggerimenti.</div>
+    </div>
+    <div class="row-popover-actions">
+      <button class="cancel-btn">Chiudi</button>
+      <span class="flex-spacer"></span>
+      <span class="ai-apply-status hint"></span>
+    </div>
+  `;
+  let anyApplied = false;
+  box.querySelector(".cancel-btn").onclick = async () => {
+    removeRowPopover(tr);
+    if (anyApplied && state.activeDrillMeta && state.activeDrillMeta.id === 0) {
+      await openDrill(state.activeDrillMeta);
+    }
+  };
+  addPopoverRow(tr, box);
+
+  const statusEl = box.querySelector(".ai-status");
+  const suggestionsEl = box.querySelector(".ai-suggestions");
+  const activeGroupEl = box.querySelector(".active-group");
+  const orphanGroupEl = box.querySelector(".orphan-group");
+  const dividerEl = box.querySelector(".ai-divider");
+  const emptyEl = box.querySelector(".ai-empty");
+  const activeChipsEl = box.querySelector(".active-chips");
+  const orphanChipsEl = box.querySelector(".orphan-chips");
+  const applyStatusEl = box.querySelector(".ai-apply-status");
+
   try {
-    const rows = await apiGet(`/api/transactions?${params.toString()}`);
-    $("#untagged-count").textContent = rows.length;
-    const tbody = $("#untagged-table tbody");
-    tbody.innerHTML = "";
-    for (const r of rows) {
-      const tr = document.createElement("tr");
-      const cls = r.amount >= 0 ? "value-positive" : "value-negative";
-      const desc = r.full_description || r.description || "";
-      tr.innerHTML = `
-        <td class="date-col">${fmtItDate(r.value_date)}</td>
-        <td class="date-col">${escHtml(r.holder_name)} <span style="color:var(--text-secondary)">(${escHtml(r.account_number)})</span></td>
-        <td class="desc-col">${escHtml(desc)}</td>
-        <td class="amount-col ${cls}">${fmtEur(r.amount)}</td>
-      `;
-      tbody.appendChild(tr);
+    const existing = collectAllKnownTags();
+    const res = await tauriInvoke("suggest_tags", {
+      description: fullDescription,
+      amount: Number(amount) || 0,
+      existingTags: existing,
+    });
+    statusEl.classList.add("hidden");
+    suggestionsEl.classList.remove("hidden");
+
+    const groupTags = collectGroupTags();
+    const renderChip = (tag, isOrphan) => {
+      const chip = document.createElement("button");
+      chip.className = "ai-chip" + (isOrphan ? " ai-chip-orphan" : "");
+      chip.textContent = tag;
+      chip.onclick = async () => {
+        if (chip.classList.contains("ai-chip-applied") || chip.disabled) return;
+        chip.disabled = true;
+        applyStatusEl.textContent = `Creo regola per "${tag}"...`;
+        try {
+          await applyTagDirectly(tag, fullDescription);
+          chip.classList.add("ai-chip-applied");
+          chip.textContent = `✓ ${tag}`;
+          applyStatusEl.textContent = `Regola creata: ${tag}`;
+          setStatus(`Regola creata: ${tag}`, "ok");
+          anyApplied = true;
+          await reloadServerConfig();
+          await refreshChart();
+          // NB: non riapro il drill subito, così l'utente può cliccare altri chip
+          // sulla stessa riga. Il drill si ricarica alla chiusura del popover.
+        } catch (e) {
+          chip.disabled = false;
+          applyStatusEl.textContent = "Errore: " + e.message;
+        }
+      };
+      return chip;
+    };
+
+    // Unisco i suggerimenti (esistenti + nuovi) e partiziono in base al fatto
+    // che il tag sia o meno presente in almeno un gruppo.
+    const allTags = [...(res.existing || []), ...(res.new || [])];
+    const seen = new Set();
+    const activeTags = [];
+    const orphanTags = [];
+    for (const t of allTags) {
+      if (seen.has(t)) continue;
+      seen.add(t);
+      if (groupTags.has(t)) activeTags.push(t);
+      else orphanTags.push(t);
+    }
+
+    if (activeTags.length > 0) {
+      activeGroupEl.classList.remove("hidden");
+      activeTags.forEach(t => activeChipsEl.appendChild(renderChip(t, false)));
+    }
+    if (orphanTags.length > 0) {
+      orphanGroupEl.classList.remove("hidden");
+      orphanTags.forEach(t => orphanChipsEl.appendChild(renderChip(t, true)));
+    }
+    if (activeTags.length > 0 && orphanTags.length > 0) {
+      dividerEl.classList.remove("hidden");
+    }
+    if (activeTags.length === 0 && orphanTags.length === 0) {
+      emptyEl.classList.remove("hidden");
     }
   } catch (e) {
-    setStatus("Errore caricamento non taggati: " + e.message, "err");
+    statusEl.textContent = "Errore AI: " + (typeof e === "string" ? e : e.message || e);
+    statusEl.classList.add("err");
   }
 }
 
@@ -1075,6 +1562,7 @@ async function init() {
   $("#close-settings-btn").onclick = closeSettings;
   $("#save-settings-btn").onclick = saveSettings;
   $("#test-connection-btn").onclick = testConnection;
+  $("#ai-mode-select").onchange = updateAiFieldsVisibility;
   $("#theme-toggle").onclick = cycleTheme;
   $("#refresh-btn").onclick = refreshAll;
   $("#include-authorized").onchange = (e) => { state.includeAuthorized = e.target.checked; txCache.clear(); refreshChart(); };
@@ -1090,12 +1578,9 @@ async function init() {
   $("#reset-seed-btn").onclick = resetSeed;
   $("#reload-config-btn").onclick = async () => {
     await reloadServerConfig();
-    await loadUntagged();
+    await refreshChart();
     setStatus("Configurazione ricaricata dal server", "ok");
   };
-  $("#section-untagged").addEventListener("toggle", (e) => {
-    if (e.target.open) loadUntagged();
-  });
 
   $$(".view-tab").forEach(b => b.onclick = () => setView(b.dataset.view));
 

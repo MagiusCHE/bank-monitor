@@ -215,7 +215,9 @@ input[type=text]:focus, input[type=date]:focus, select:focus {
   color: var(--text-secondary);
 }
 
-.setting-row input[type=text] {
+.setting-row input[type=text],
+.setting-row input[type=password],
+.setting-row select {
   flex: 1;
   min-width: 200px;
 }
@@ -267,6 +269,15 @@ input[type=text]:focus, input[type=date]:focus, select:focus {
 .account-chip .del svg { width: 14px; height: 14px; }
 .account-chip.active .del { color: var(--on-accent); }
 
+.status-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin-bottom: 10px;
+  padding: 0 4px;
+}
+.status-bar .status-msg { margin-bottom: 0; padding: 0; flex: 1; }
+
 .status-msg {
   padding: 0 4px;
   margin-bottom: 10px;
@@ -277,6 +288,14 @@ input[type=text]:focus, input[type=date]:focus, select:focus {
 .status-msg.ok { color: var(--positive); }
 .status-msg.err { color: var(--negative); }
 .status-msg.warn { color: var(--warning); }
+
+.trading-pnl {
+  font-size: 0.88rem;
+  color: var(--text-secondary);
+}
+.trading-pnl.value-positive { color: var(--positive); }
+.trading-pnl.value-negative { color: var(--negative); }
+.trading-pnl .hint { font-size: 0.82rem; }
 
 #chart-section {
   height: 460px;
@@ -547,6 +566,161 @@ input[type=text]:focus, input[type=date]:focus, select:focus {
 
 .value-positive { color: var(--positive); }
 .value-negative { color: var(--negative); }
+
+/* --- Untagged row actions + tag popover --- */
+.untagged-actions {
+  white-space: nowrap;
+  text-align: right;
+}
+.untagged-actions .row-btn {
+  padding: 3px 8px;
+  font-size: 0.8rem;
+  margin-left: 4px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.untagged-actions .row-btn:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
+}
+.untagged-actions .row-btn-ai:hover {
+  background: var(--accent);
+}
+
+.row-popover-row > td.row-popover-cell {
+  background: var(--panel);
+  border-top: none;
+  padding: 10px 16px 14px;
+}
+.row-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+}
+.row-popover-title {
+  font-weight: 600;
+  color: var(--text);
+}
+.row-popover-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.row-popover-field label {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+.row-popover-field input[type=text] {
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+.row-popover-field input[type=text]:read-only {
+  background: var(--panel);
+  color: var(--text-secondary);
+}
+.match-mode-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pattern-hint {
+  font-size: 0.78rem;
+  margin-top: 2px;
+}
+.row-popover-check {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  margin-top: 4px;
+}
+.row-popover-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.row-popover-status {
+  min-height: 1.2em;
+}
+.row-popover-status.err { color: var(--negative); }
+
+/* --- AI suggestions --- */
+.ai-status.hint {
+  font-style: italic;
+}
+.ai-status.err { color: var(--negative); }
+.ai-suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ai-group-label {
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+.ai-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ai-chip {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 0.85rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.ai-chip:hover {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
+}
+.ai-chip-orphan {
+  border-style: dashed;
+  border-color: var(--warning, #d97706);
+  color: var(--warning, #d97706);
+}
+.ai-chip-applied,
+.ai-chip-applied:hover {
+  background: var(--positive);
+  color: #fff;
+  border-color: var(--positive);
+  border-style: solid;
+  cursor: default;
+}
+
+.ai-group {
+  display: flex;
+  flex-direction: column;
+}
+.ai-divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 4px 0;
+}
+.ai-apply-status {
+  margin-left: auto;
+}
 
 @media (max-width: 720px) {
   .group-form { grid-template-columns: 1fr 1fr; }
