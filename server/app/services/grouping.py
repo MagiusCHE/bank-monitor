@@ -63,12 +63,18 @@ def compute_tags(
     description: Optional[str],
     full_description: Optional[str],
     rules: list[CompiledRule],
+    enriched_description: Optional[str] = None,
 ) -> list[str]:
-    """Ritorna tag ordinati (dedup) applicando tutte le regole che matchano."""
+    """Ritorna tag ordinati (dedup) applicando tutte le regole che matchano.
+
+    La fonte "estesa" è enriched_description se presente, altrimenti full_description:
+    per una SDD PayPal arricchita con il merchant reale (es. "Zalando Payments GmbH"),
+    il tagging si basa sul merchant invece che sulla descrizione generica SEPA.
+    """
     desc = description or ""
-    full = full_description or ""
-    haystack = desc + " " + full
-    dewrapped = desc + " " + dewrap(full)
+    extended = enriched_description or full_description or ""
+    haystack = desc + " " + extended
+    dewrapped = desc + " " + dewrap(extended)
     seen: list[str] = []
     s: set[str] = set()
     for rule, rx in rules:

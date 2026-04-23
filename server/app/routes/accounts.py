@@ -68,7 +68,8 @@ def list_transactions(
 
     rows = db.conn().execute(
         "SELECT t.id, t.account_id, a.account_number, a.holder_name, "
-        "       t.op_date, t.value_date, t.amount, t.description, t.full_description, t.status "
+        "       t.op_date, t.value_date, t.amount, t.description, t.full_description, "
+        "       t.enriched_description, t.status "
         "FROM transactions t JOIN accounts a ON a.id = t.account_id "
         "WHERE " + " AND ".join(where) +
         " ORDER BY t.value_date DESC, ABS(t.amount) DESC LIMIT ?",
@@ -81,7 +82,7 @@ def list_transactions(
     out: list[dict] = []
     for r in rows:
         d = dict(r)
-        tags = compute_tags(r["description"], r["full_description"], rules)
+        tags = compute_tags(r["description"], r["full_description"], rules, r["enriched_description"])
         d["tags"] = tags
 
         if untagged and tags:
@@ -138,7 +139,7 @@ def trading_transactions(
     args.extend(clause_args)
 
     rows = db.conn().execute(
-        "SELECT id, value_date, amount, description, full_description "
+        "SELECT id, value_date, amount, description, full_description, enriched_description "
         "FROM transactions WHERE " + " AND ".join(where) +
         " ORDER BY value_date, id",
         args,

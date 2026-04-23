@@ -250,7 +250,8 @@ def group_stats(
         args.append(date_to)
 
     tx_rows = db.conn().execute(
-        "SELECT amount, description, full_description FROM transactions WHERE " + " AND ".join(where),
+        "SELECT amount, description, full_description, enriched_description "
+        "FROM transactions WHERE " + " AND ".join(where),
         args,
     ).fetchall()
 
@@ -270,7 +271,7 @@ def group_stats(
 
     for t in tx_rows:
         amount = float(t["amount"])
-        tags = compute_tags(t["description"], t["full_description"], rules)
+        tags = compute_tags(t["description"], t["full_description"], rules, t["enriched_description"])
         gid = match_group(amount, tags, groups)
         if gid is None:
             bucket = uncategorized_income if amount >= 0 else uncategorized_expense

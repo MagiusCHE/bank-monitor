@@ -24,7 +24,7 @@ TAG_RULES: list[tuple[str, str, str, int]] = [
     ("Benefici statali",        r"(?i)assegno\s*unico|ord:\s*inps|ord:\s*agenzia\s*entrate|bonus\s*(?:affitto|ristruttur|renzi)|rimborso\s*730", "statale", 30),
 
     # E-commerce
-    ("E-commerce",              r"(?i)paypal|amazon|\bamzn\b|\bebay\b|zalando|aliexpress", "ecommerce", 40),
+    ("E-commerce",              r"(?i)paypal|amazon|\bamzn\b|\bebay\b|aliexpress|shein|temu|infinite\s*styles|wish\.com", "ecommerce", 40),
 
     # Bonifici
     ("Bonifici ricevuti",       r"(?i)bonifico.*(entrata|ricevut|estero)|accredito bonifico", "bonifico-in", 60),
@@ -46,13 +46,16 @@ TAG_RULES: list[tuple[str, str, str, int]] = [
     ("Hotel/Alloggio",          r"(?i)\bhotel\b|\balbergo\b|\bresort\b|\bb\s*&\s*b\b|bed\s*and\s*breakfast|airbnb|booking\.com|agriturism", "hotel", 87),
     ("Impianti sportivi/Sci",   r"(?i)impianti\s*risalita|ski\s*pass|skipass|seggiovia|funivi|ski\s*area", "sport-impianti", 88),
     ("Negozio sport/bici",      r"(?i)decathlon|cisalfa|cicli\s|\bbike\b|biciclett", "sport-attrezzature", 89),
+    ("Gaming/Videogiochi",      r"(?i)steampowered|humble\s*bundle|nintendo|playstation|xbox\s*live", "gaming", 89),
+    ("Hosting/Servizi digitali", r"(?i)\baruba\b|\bovh\b|godaddy|register\.it|seeweb", "hosting", 89),
 
     # Mezzi
-    ("Parcheggio",              r"(?i)parchegg", "parcheggio", 90),
+    ("Parcheggio",              r"(?i)parchegg|easypark", "parcheggio", 90),
     ("Carburante",              r"(?i)stazione\s*servizio|carburant|benzin|diesel|gasolio|petrol|\beni\b|eni\d|\besso\b|\bq8\b|tamoil|\bagip\b|\bip\b\s|totalerg|\bdistributore\b", "carburante", 91),
     ("Autostrada",              r"(?i)autostrad|telepass|pedagg|\baspit\b", "autostrada", 92),
     ("Auto - servizi",          r"(?i)officin|carrozzer|gommist|revision|meccanic|autolav|car\s*wash", "auto-servizi", 93),
-    ("Bollo/RC auto",           r"(?i)bollo\s*auto|rc\s*auto", "auto-tasse", 94),
+    ("Bollo/RC auto",           r"(?i)bollo\s*auto|rc\s*auto|prima\s*assicurazioni|genialloyd|\ballianz\b|unipol|generali\s*italia|\bzurich\b|quixa|linear\s*assicur|direct\s*line", "auto-tasse", 94),
+    ("Trasporti pubblici",      r"(?i)trenitalia|\bitalo\b|\batac\b|atm\s*milano|\btper\b|\bamt\b", "trasporti-pubblici", 95),
 
     # Salute
     ("Farmacia",                r"(?i)farmacia|parafarm", "farmacia", 100),
@@ -60,7 +63,7 @@ TAG_RULES: list[tuple[str, str, str, int]] = [
 
     # Spesa / negozi generici
     ("Supermercato",            r"(?i)\bconad\b|\blidl\b|esselunga|carrefour|eurospin|\btigre\b|\btodis\b|\bcoop\b|ipercoop|simply|\bpam\b|penny\s*market|\biper\b|supermercato|supermarket|\bmarket\b|\btedi\b", "spesa", 110),
-    ("Abbigliamento",           r"(?i)intimissimi|zara|oviesse|upim|terranova|\bh\s*&\s*m\b|calzedonia|yamamay|tezenis|\boutlet\b", "abbigliamento", 115),
+    ("Abbigliamento",           r"(?i)intimissimi|zara|oviesse|upim|terranova|\bh\s*&\s*m\b|calzedonia|yamamay|tezenis|\boutlet\b|zalando|miroglio", "abbigliamento", 115),
     ("Parrucchiere/Barbiere",   r"(?i)parrucchier|barbier", "barbiere", 116),
     ("Libreria",                r"(?i)mondadori|feltrinelli|libreria|bookstore|giunti\s*al\s*punto|cartolibreria|cartoleria", "libreria", 117),
     ("Profumeria",              r"(?i)profumeria|sephora|douglas|kiko", "profumeria", 118),
@@ -70,11 +73,13 @@ TAG_RULES: list[tuple[str, str, str, int]] = [
     ("Calzature",               r"(?i)calzatur|bata\b|geox|foot\s*locker|pittarello|pittarosso|\bscarpe\b", "calzature", 122),
     ("Vivaio/Piante",           r"(?i)vivaio|florovivai|garden\s*center", "vivaio", 123),
     ("Casalinghi/Detersivi",    r"(?i)tigot[àa]|acqua\s*e\s*sapone|dimeglio|casalingh|detersivi", "casalinghi", 124),
+    ("Foto/Stampe",             r"(?i)photosi|fotograf", "foto", 125),
 
     # Bollette
     ("Telefonia",               r"(?i)fastweb|\btim\b|vodafone|wind\s*tre|iliad|tiscali|telecom\s*italia", "telefonia", 195),
     ("Acqua",                   r"(?i)\bacqua\s|servizio\s*idrico|acquedotto", "acqua", 196),
     ("TV",                      r"(?i)\bsky\b|netflix|disney\s*plus|prime\s*video|dazn|now\s*tv", "tv", 197),
+    ("Luce/Gas",                r"(?i)\bedison\b|\benel\b|enel\s*energia|eni\s*plenitude|\ba2a\b|hera\s*comm|iren\s*mercato|illumia|sorgenia", "luce-gas", 198),
 
     # Prelievi ATM (strumento di pagamento specifico)
     ("Prelievo ATM",            r"(?i)\bprelievo\b|\bprelev", "prelievo", 200),
@@ -98,12 +103,13 @@ GROUPS: list[tuple[str, str, int, list[str]]] = [
     ("Condominio",              "expense", 70,  ["condominio"]),
     ("Colazioni/Merende",       "expense", 80,  ["bar", "caffe", "gelateria"]),
     ("Pranzi/Cene",             "expense", 81,  ["ristorante", "pizzeria", "fast-food"]),
-    ("Svago",                   "expense", 85,  ["cinema", "hotel", "sport-impianti", "sport-attrezzature"]),
-    ("Mezzi",                   "expense", 90,  ["parcheggio", "carburante", "autostrada", "auto-servizi", "auto-tasse"]),
+    ("Svago",                   "expense", 85,  ["cinema", "hotel", "sport-impianti", "sport-attrezzature", "gaming", "hosting"]),
+    ("Mezzi",                   "expense", 90,  ["parcheggio", "carburante", "autostrada", "auto-servizi", "auto-tasse", "trasporti-pubblici"]),
     ("Mediche",                 "expense", 100, ["farmacia", "medico"]),
-    ("Spesa",                   "expense", 110, ["spesa", "abbigliamento", "barbiere", "libreria", "profumeria", "vino", "ferramenta", "elettronica", "calzature", "vivaio", "casalinghi"]),
+    ("Abbigliamento",           "any",     109, ["abbigliamento", "calzature"]),
+    ("Spesa",                   "expense", 110, ["spesa", "barbiere", "libreria", "profumeria", "vino", "ferramenta", "elettronica", "vivaio", "casalinghi", "foto"]),
     ("Bonifici inviati",        "expense", 120, ["bonifico-out"]),
-    ("Bollette",                "expense", 195, ["telefonia", "acqua", "tv"]),
+    ("Bollette",                "expense", 195, ["telefonia", "acqua", "tv", "luce-gas"]),
     ("Prelievi ATM",            "expense", 200, ["prelievo"]),
     ("Addebiti SEPA / Utenze",  "expense", 202, ["sepa"]),
     ("F24 / Tasse",             "expense", 210, ["f24"]),
