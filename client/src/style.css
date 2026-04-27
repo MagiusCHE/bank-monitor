@@ -253,16 +253,190 @@ input[type=text]:focus, input[type=date]:focus, select:focus {
   min-width: 200px;
 }
 
+/* Toolbar a due colonne: sinistra (filtri + conti) e destra (date + shortcut).
+   Le colonne non vanno mai a capo: solo le righe interne wrappano. */
+#toolbar {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 16px;
+}
+.toolbar-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0; /* per evitare overflow del figlio flex */
+}
+.toolbar-col-left {
+  flex: 1 1 auto;
+  /* Gap maggiore della colonna destra: le righe a sinistra (label+chips) sono
+     più basse di quelle a destra (datepicker+badge); con lo stesso gap
+     sembrerebbero disallineate. */
+  gap: 14px;
+}
+.toolbar-col-right {
+  flex: 0 0 auto;
+  align-items: flex-end;
+}
+
 #toolbar .toolbar-row {
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-  margin-bottom: 8px;
 }
-#toolbar .toolbar-row:last-child { margin-bottom: 0; }
 
 .flex-spacer { flex: 1; }
+
+/* Shortcut di range date (ultimo mese / 12 mesi / da gen / da sempre). */
+.date-shortcuts {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.date-shortcut {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+.date-shortcut:hover {
+  background: var(--accent-light);
+  color: var(--text);
+}
+.date-shortcut.active {
+  background: var(--accent);
+  color: var(--on-accent);
+  border-color: var(--accent);
+  font-weight: 600;
+}
+
+/* Datepicker custom (sostituisce <input type="date"> nativo). */
+.datepicker {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px 4px 8px;
+  font-size: 0.88rem;
+}
+.datepicker:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-light);
+}
+.datepicker-text {
+  background: transparent;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  /* "gg/mm/aaaa" sono 10 caratteri. A font-size 0.88rem 102px è la misura
+     empiricamente "giusta": data intera visibile, niente padding sprecato. */
+  width: 102px;
+  min-width: 0;
+  letter-spacing: 0.02em;
+}
+.datepicker-text::placeholder { color: var(--text-secondary); }
+.datepicker-trigger {
+  background: transparent;
+  border: 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0 2px;
+  display: inline-flex;
+  align-items: center;
+}
+.datepicker-trigger:hover { color: var(--text); }
+.datepicker-trigger svg { width: 16px; height: 16px; }
+
+.datepicker-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 100;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  user-select: none;
+  min-width: 240px;
+}
+.datepicker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font-size: 0.88rem;
+  gap: 4px;
+}
+.datepicker-header button {
+  background: transparent;
+  border: 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.92rem;
+  line-height: 1;
+}
+.datepicker-header button:hover {
+  background: var(--bg-secondary);
+  color: var(--text);
+}
+.datepicker-title {
+  flex: 1;
+  text-align: center;
+  text-transform: capitalize;
+  color: var(--text);
+}
+.datepicker-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+.datepicker-dow {
+  text-align: center;
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  padding: 4px 0 2px;
+}
+.datepicker-day {
+  text-align: center;
+  padding: 5px 0;
+  font-size: 0.85rem;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.datepicker-day:hover { background: var(--bg-secondary); }
+.datepicker-day.outside { color: var(--text-secondary); opacity: 0.5; }
+.datepicker-day.today {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+.datepicker-day.selected {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+.datepicker-day.selected:hover { background: var(--accent); }
+.datepicker-day.disabled {
+  color: var(--text-secondary);
+  opacity: 0.3;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 
 #account-picker {
   display: flex;

@@ -39,6 +39,9 @@ const state = {
   openaiModel: "gpt-4o",
   // Vista Gruppi: una sola barra col netto invece di stacked entrate/uscite
   barNetOnly: false,
+  // Shortcut di range date attivo (last-month / last-12m / ytd / all). null =
+  // range custom impostato manualmente dall'utente.
+  activeShortcut: "last-12m",
 };
 
 // Descrizione da mostrare per una transazione: priorità enriched (da PayPal match)
@@ -237,8 +240,11 @@ function setStatus(msg, cls = "") {
 
 function fmtEur(n) {
   if (n == null || isNaN(n)) return "-";
+  // useGrouping: "always" — il default it-IT in V8 omette il separatore migliaia
+  // per numeri a 4 cifre (es. 2919,56 anziché 2.919,56). Forziamo sempre.
   return new Intl.NumberFormat("it-IT", {
     style: "currency", currency: "EUR", minimumFractionDigits: 2,
+    useGrouping: "always",
   }).format(n);
 }
 
@@ -254,6 +260,267 @@ function extractTimeFromDesc(s) {
   const m = s.match(/\b(?:ora|ore|h\.?)\s*(\d{1,2}[:\.]\d{2})/i) || s.match(/\b(\d{1,2}:\d{2})(?::\d{2})?\b/);
   if (!m) return null;
   return m[1].replace(".", ":");
+}
+
+// ============================================================================
+// DatePicker custom (sostituisce <input type="date"> nativo che su WebKitGTK
+// non si chiude su click esterno). Localizzato it-IT, settimana lun-dom.
+// API: new DatePicker(host, { onChange, min, max, value }).
+//   - host: elemento DOM in cui montare il picker
+//   - onChange(iso): callback con la nuova data ISO (YYYY-MM-DD) o "" se vuota
+//   - getValue() / setValue(iso) — iso = "" per "nessuna data"
+//   - setMin(iso) / setMax(iso)
+// ============================================================================
+const CALENDAR_ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>';
+const MONTH_NAMES_IT = ["gennaio","febbraio","marzo","aprile","maggio","giugno","luglio","agosto","settembre","ottobre","novembre","dicembre"];
+const DOW_SHORT_IT = ["lun","mar","mer","gio","ven","sab","dom"];
+
+function isoToParts(iso) {
+  if (!iso || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
+  const [y, m, d] = iso.split("-").map(Number);
+  if (y < 1900 || m < 1 || m > 12 || d < 1 || d > 31) return null;
+  return { y, m, d };
+}
+function partsToIso(y, m, d) {
+  return `${String(y).padStart(4,"0")}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+}
+function fmtItDateShort(iso) {
+  const p = isoToParts(iso);
+  if (!p) return "";
+  return `${String(p.d).padStart(2,"0")}/${String(p.m).padStart(2,"0")}/${p.y}`;
+}
+// Parse "gg/mm/aaaa" con / o - o . come separatore. Anno a 2 cifre → 20XX.
+function parseItDate(text) {
+  const m = String(text || "").trim().match(/^(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2}|\d{4})$/);
+  if (!m) return null;
+  let y = Number(m[3]);
+  if (y < 100) y += 2000;
+  const mo = Number(m[2]);
+  const d = Number(m[1]);
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  // Controllo "giorno effettivamente esistente" (es. 31 febbraio → invalido)
+  const dt = new Date(y, mo - 1, d);
+  if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+  return partsToIso(y, mo, d);
+}
+function todayIso() {
+  const t = new Date();
+  return partsToIso(t.getFullYear(), t.getMonth() + 1, t.getDate());
+}
+function clampIso(iso, min, max) {
+  if (!iso) return iso;
+  if (min && iso < min) return min;
+  if (max && iso > max) return max;
+  return iso;
+}
+
+class DatePicker {
+  constructor(host, opts = {}) {
+    this.host = host;
+    this.onChange = opts.onChange || (() => {});
+    this.min = opts.min || "";
+    this.max = opts.max || "";
+    this.value = opts.value || "";
+    // Mese mostrato (1-12) e anno del calendario aperto
+    const init = isoToParts(this.value || todayIso()) || { y: new Date().getFullYear(), m: new Date().getMonth() + 1 };
+    this.viewYear = init.y;
+    this.viewMonth = init.m;
+    this._buildDom();
+    this._renderInput();
+  }
+
+  _buildDom() {
+    this.host.classList.add("datepicker");
+    this.host.innerHTML = "";
+
+    this.input = document.createElement("input");
+    this.input.type = "text";
+    this.input.className = "datepicker-text";
+    this.input.placeholder = "gg/mm/aaaa";
+    this.input.spellcheck = false;
+    this.input.autocomplete = "off";
+    this.input.inputMode = "numeric";
+
+    this.trigger = document.createElement("button");
+    this.trigger.type = "button";
+    this.trigger.className = "datepicker-trigger";
+    this.trigger.title = "Apri calendario";
+    this.trigger.innerHTML = CALENDAR_ICON_SVG;
+
+    this.popover = document.createElement("div");
+    this.popover.className = "datepicker-popover hidden";
+
+    this.host.append(this.input, this.trigger, this.popover);
+
+    this.input.addEventListener("change", () => this._commitTextInput());
+    this.input.addEventListener("blur", () => this._commitTextInput());
+    this.input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); this._commitTextInput(); this.input.blur(); }
+      else if (e.key === "Escape") { this._renderInput(); this.input.blur(); }
+    });
+    this.input.addEventListener("focus", () => this.input.select());
+
+    this.trigger.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.toggle();
+    });
+
+    // Click fuori = chiudi
+    this._docClick = (e) => {
+      if (!this.host.contains(e.target)) this.close();
+    };
+    this._docKey = (e) => { if (e.key === "Escape") this.close(); };
+  }
+
+  _commitTextInput() {
+    const text = this.input.value;
+    if (!text.trim()) {
+      this._setValueInternal("", true);
+      return;
+    }
+    const iso = parseItDate(text);
+    if (iso == null) {
+      this._renderInput(); // ripristina al valore corrente
+      return;
+    }
+    const clamped = clampIso(iso, this.min, this.max);
+    this._setValueInternal(clamped, true);
+  }
+
+  _renderInput() {
+    this.input.value = this.value ? fmtItDateShort(this.value) : "";
+  }
+
+  _renderPopover() {
+    const y = this.viewYear, m = this.viewMonth;
+    // Primo giorno mese, calcola offset rispetto a lunedì (getDay: dom=0)
+    const first = new Date(y, m - 1, 1);
+    const lastDay = new Date(y, m, 0).getDate();
+    const dow0 = (first.getDay() + 6) % 7; // 0 = lunedì
+
+    const today = todayIso();
+    const dowHead = DOW_SHORT_IT.map(d => `<div class="datepicker-dow">${d}</div>`).join("");
+
+    const cells = [];
+    // Giorni dal mese precedente per riempire la prima riga
+    if (dow0 > 0) {
+      const prevLast = new Date(y, m - 1, 0).getDate();
+      const prevY = m === 1 ? y - 1 : y;
+      const prevM = m === 1 ? 12 : m - 1;
+      for (let i = dow0 - 1; i >= 0; i--) {
+        const d = prevLast - i;
+        const iso = partsToIso(prevY, prevM, d);
+        cells.push(this._dayCell(d, iso, true, today));
+      }
+    }
+    for (let d = 1; d <= lastDay; d++) {
+      const iso = partsToIso(y, m, d);
+      cells.push(this._dayCell(d, iso, false, today));
+    }
+    // Riempio fino a multiplo di 7 con giorni del mese successivo
+    const total = dow0 + lastDay;
+    const trailing = (7 - (total % 7)) % 7;
+    if (trailing > 0) {
+      const nextY = m === 12 ? y + 1 : y;
+      const nextM = m === 12 ? 1 : m + 1;
+      for (let d = 1; d <= trailing; d++) {
+        const iso = partsToIso(nextY, nextM, d);
+        cells.push(this._dayCell(d, iso, true, today));
+      }
+    }
+
+    this.popover.innerHTML = `
+      <div class="datepicker-header">
+        <button type="button" data-nav="-y" title="Anno precedente">‹‹</button>
+        <button type="button" data-nav="-m" title="Mese precedente">‹</button>
+        <span class="datepicker-title">${MONTH_NAMES_IT[m - 1]} ${y}</span>
+        <button type="button" data-nav="+m" title="Mese successivo">›</button>
+        <button type="button" data-nav="+y" title="Anno successivo">››</button>
+      </div>
+      <div class="datepicker-grid">
+        ${dowHead}
+        ${cells.join("")}
+      </div>
+    `;
+
+    this.popover.querySelectorAll("button[data-nav]").forEach(btn => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const dir = btn.dataset.nav;
+        if (dir === "-m") { this.viewMonth--; if (this.viewMonth < 1) { this.viewMonth = 12; this.viewYear--; } }
+        else if (dir === "+m") { this.viewMonth++; if (this.viewMonth > 12) { this.viewMonth = 1; this.viewYear++; } }
+        else if (dir === "-y") { this.viewYear--; }
+        else if (dir === "+y") { this.viewYear++; }
+        this._renderPopover();
+      });
+    });
+    this.popover.querySelectorAll(".datepicker-day").forEach(el => {
+      if (el.classList.contains("disabled")) return;
+      el.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const iso = el.dataset.iso;
+        if (!iso) return;
+        this._setValueInternal(iso, true);
+        this.close();
+      });
+    });
+  }
+
+  _dayCell(d, iso, outside, todayIsoStr) {
+    const isDisabled = (this.min && iso < this.min) || (this.max && iso > this.max);
+    const cls = ["datepicker-day"];
+    if (outside) cls.push("outside");
+    if (iso === todayIsoStr) cls.push("today");
+    if (iso === this.value) cls.push("selected");
+    if (isDisabled) cls.push("disabled");
+    return `<div class="${cls.join(" ")}" data-iso="${iso}">${d}</div>`;
+  }
+
+  _setValueInternal(iso, fireChange) {
+    if (iso === this.value) {
+      this._renderInput();
+      return;
+    }
+    this.value = iso;
+    if (iso) {
+      const p = isoToParts(iso);
+      if (p) { this.viewYear = p.y; this.viewMonth = p.m; }
+    }
+    this._renderInput();
+    if (!this.popover.classList.contains("hidden")) this._renderPopover();
+    if (fireChange) this.onChange(iso);
+  }
+
+  setValue(iso) { this._setValueInternal(iso || "", false); }
+  getValue() { return this.value; }
+  setMin(iso) { this.min = iso || ""; if (!this.popover.classList.contains("hidden")) this._renderPopover(); }
+  setMax(iso) { this.max = iso || ""; if (!this.popover.classList.contains("hidden")) this._renderPopover(); }
+
+  open() {
+    if (!this.popover.classList.contains("hidden")) return;
+    // Apri sempre sul mese del valore corrente (se presente), altrimenti sul mese
+    // attualmente memorizzato (utente potrebbe averlo navigato e poi chiuso).
+    if (this.value) {
+      const p = isoToParts(this.value);
+      if (p) { this.viewYear = p.y; this.viewMonth = p.m; }
+    }
+    this._renderPopover();
+    this.popover.classList.remove("hidden");
+    document.addEventListener("mousedown", this._docClick, true);
+    document.addEventListener("keydown", this._docKey, true);
+  }
+  close() {
+    if (this.popover.classList.contains("hidden")) return;
+    this.popover.classList.add("hidden");
+    document.removeEventListener("mousedown", this._docClick, true);
+    document.removeEventListener("keydown", this._docKey, true);
+  }
+  toggle() {
+    if (this.popover.classList.contains("hidden")) this.open(); else this.close();
+  }
 }
 
 // ============================================================================
@@ -762,8 +1029,14 @@ async function reloadServerConfig() {
   await bootstrapConfig();
 }
 
+// Istanze dei due datepicker custom — create in init().
+let datepickerFrom = null;
+let datepickerTo = null;
+
 function syncDateInputs() {
-  // Calcola range min/max reale dei conti selezionati (o di tutti)
+  // Calcola range min/max reale dei conti selezionati (o di tutti). minDate è
+  // la data della prima tx; maxDate è la "data odierna" funzionale (= ultima
+  // tx disponibile). Gli shortcut sono ancorati a maxDate, non a Date.now().
   const pool = state.accounts.filter(a => state.selectedIds.has(a.id));
   const source = pool.length > 0 ? pool : state.accounts;
   const firsts = source.map(a => a.first_tx).filter(Boolean);
@@ -771,22 +1044,70 @@ function syncDateInputs() {
   const minDate = firsts.length ? firsts.reduce((a, b) => a < b ? a : b) : "";
   const maxDate = lasts.length ? lasts.reduce((a, b) => a > b ? a : b) : "";
 
-  const fromEl = $("#date-from");
-  const toEl = $("#date-to");
-  fromEl.min = minDate || "";
-  fromEl.max = maxDate || "";
-  toEl.min = minDate || "";
-  toEl.max = maxDate || "";
-  // Primo caricamento: default ultimi 12 mesi (o tutto il range se più corto)
-  if (!state.dateTo) {
-    state.dateTo = maxDate || "";
-    toEl.value = state.dateTo;
+  if (datepickerFrom) { datepickerFrom.setMin(minDate); datepickerFrom.setMax(maxDate); }
+  if (datepickerTo)   { datepickerTo.setMin(minDate);   datepickerTo.setMax(maxDate); }
+
+  // Default al primo avvio (o se il range è ancora vuoto): "ultimi 12 mesi"
+  // ancorati a maxDate. Se uno shortcut è già attivo (es. l'utente l'ha
+  // scelto e poi ha cambiato i conti), lo ricalcolo per mantenere la coerenza.
+  if (!state.dateFrom && !state.dateTo) {
+    applyShortcut("last-12m", { silent: true });
+  } else if (state.activeShortcut) {
+    applyShortcut(state.activeShortcut, { silent: true });
   }
-  if (!state.dateFrom) {
-    const defaultFrom = minusOneYear(state.dateTo);
-    state.dateFrom = (minDate && defaultFrom < minDate) ? minDate : defaultFrom;
-    fromEl.value = state.dateFrom;
+}
+
+// Calcola il range {from, to} di uno shortcut. Ancorato a maxDate (= "oggi"
+// funzionale, l'ultima tx disponibile). Ritorna null se non ci sono dati.
+function computeShortcutRange(name) {
+  const pool = state.accounts.filter(a => state.selectedIds.has(a.id));
+  const source = pool.length > 0 ? pool : state.accounts;
+  const firsts = source.map(a => a.first_tx).filter(Boolean);
+  const lasts = source.map(a => a.last_tx).filter(Boolean);
+  const minDate = firsts.length ? firsts.reduce((a, b) => a < b ? a : b) : "";
+  const maxDate = lasts.length ? lasts.reduce((a, b) => a > b ? a : b) : "";
+  if (!maxDate) return null;
+
+  const max = new Date(maxDate + "T00:00:00");
+  const clampMin = (iso) => (minDate && iso < minDate) ? minDate : iso;
+  const toIso = (d) => d.toISOString().slice(0, 10);
+  switch (name) {
+    case "last-month": {
+      const d = new Date(max); d.setMonth(d.getMonth() - 1);
+      return { from: clampMin(toIso(d)), to: maxDate };
+    }
+    case "last-12m": {
+      const d = new Date(max); d.setFullYear(d.getFullYear() - 1);
+      return { from: clampMin(toIso(d)), to: maxDate };
+    }
+    case "ytd": {
+      const d = new Date(max.getFullYear(), 0, 1);
+      return { from: clampMin(toIso(d)), to: maxDate };
+    }
+    case "all":
+      return { from: minDate || maxDate, to: maxDate };
   }
+  return null;
+}
+
+// Applica uno shortcut: aggiorna stato, datepicker e badge attivo.
+// Se silent=true non chiama refreshChart (usato durante syncDateInputs).
+function applyShortcut(name, opts = {}) {
+  const range = computeShortcutRange(name);
+  if (!range) return;
+  state.dateFrom = range.from;
+  state.dateTo = range.to;
+  state.activeShortcut = name;
+  if (datepickerFrom) datepickerFrom.setValue(range.from);
+  if (datepickerTo) datepickerTo.setValue(range.to);
+  markActiveShortcut(name);
+  if (!opts.silent) refreshChart();
+}
+
+function markActiveShortcut(name) {
+  document.querySelectorAll(".date-shortcut").forEach(b => {
+    b.classList.toggle("active", b.dataset.range === name);
+  });
 }
 
 function minusOneYear(isoDate) {
@@ -1997,8 +2318,27 @@ async function init() {
     saveConfig();
     refreshChart();
   };
-  $("#date-from").onchange = (e) => { state.dateFrom = e.target.value; refreshChart(); };
-  $("#date-to").onchange = (e) => { state.dateTo = e.target.value; refreshChart(); };
+  datepickerFrom = new DatePicker($("#datepicker-from"), {
+    value: state.dateFrom,
+    onChange: (iso) => {
+      state.dateFrom = iso;
+      state.activeShortcut = null;
+      markActiveShortcut(null);
+      refreshChart();
+    },
+  });
+  datepickerTo = new DatePicker($("#datepicker-to"), {
+    value: state.dateTo,
+    onChange: (iso) => {
+      state.dateTo = iso;
+      state.activeShortcut = null;
+      markActiveShortcut(null);
+      refreshChart();
+    },
+  });
+  document.querySelectorAll(".date-shortcut").forEach(btn => {
+    btn.addEventListener("click", () => applyShortcut(btn.dataset.range));
+  });
   $("#drill-close").onclick = closeDrill;
   $("#add-rule-btn").onclick = addRuleRow;
   $("#save-rules-btn").onclick = saveRules;

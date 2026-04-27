@@ -95,24 +95,37 @@
 
     <!-- Barra di stato / filtri -->
     <section id="toolbar" class="panel hidden">
-      <div class="toolbar-row">
-        <label>
-          <input type="checkbox" id="include-authorized"> Includi movimenti autorizzati
-        </label>
-        <label title="Esclude compravendite titoli, dividendi, cedole — le vedi nella vista Gruppi">
-          <input type="checkbox" id="exclude-trading" checked> Escludi trading
-        </label>
-        <label id="bar-net-only-label" class="hidden" title="Mostra una sola barra per gruppo col valore netto (entrate − uscite). Verde se ≥ 0, rosso se &lt; 0.">
-          <input type="checkbox" id="bar-net-only"> Mostra solo netto per gruppo
-        </label>
-        <span class="flex-spacer"></span>
-        <label>Da <input type="date" id="date-from"></label>
-        <label>A <input type="date" id="date-to"></label>
-        <button id="refresh-btn" title="Aggiorna">↻</button>
+      <div class="toolbar-col toolbar-col-left">
+        <div class="toolbar-row">
+          <label>
+            <input type="checkbox" id="include-authorized"> Includi movimenti autorizzati
+          </label>
+          <label title="Esclude compravendite titoli, dividendi, cedole — le vedi nella vista Gruppi">
+            <input type="checkbox" id="exclude-trading" checked> Escludi trading
+          </label>
+          <label id="bar-net-only-label" class="hidden" title="Mostra una sola barra per gruppo col valore netto (entrate − uscite). Verde se ≥ 0, rosso se &lt; 0.">
+            <input type="checkbox" id="bar-net-only"> Mostra solo netto per gruppo
+          </label>
+        </div>
+        <div class="toolbar-row" id="account-picker-row">
+          <span class="label">Conti:</span>
+          <div id="account-picker"></div>
+        </div>
       </div>
-      <div class="toolbar-row" id="account-picker-row">
-        <span class="label">Conti:</span>
-        <div id="account-picker"></div>
+      <div class="toolbar-col toolbar-col-right">
+        <div class="toolbar-row">
+          <label>Da <span class="datepicker" id="datepicker-from"></span></label>
+          <label>A <span class="datepicker" id="datepicker-to"></span></label>
+          <button id="refresh-btn" title="Aggiorna">↻</button>
+        </div>
+        <div class="toolbar-row" id="date-shortcuts-row">
+          <div class="date-shortcuts">
+            <button type="button" class="date-shortcut" data-range="last-month">Ultimo mese</button>
+            <button type="button" class="date-shortcut" data-range="last-12m">Ultimi 12 mesi</button>
+            <button type="button" class="date-shortcut" data-range="ytd">Dal 1° gen</button>
+            <button type="button" class="date-shortcut" data-range="all">Da sempre</button>
+          </div>
+        </div>
       </div>
     </section>
 
