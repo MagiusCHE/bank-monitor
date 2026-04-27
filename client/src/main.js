@@ -1,5 +1,11 @@
 // Bank Monitor - frontend
 // Stato globale
+//
+// Architettura: il server è "dumb storage". Al boot scarichiamo TUTTE le
+// transazioni e le teniamo in `state.allTx`. Tutti i filtri, il tagging, il
+// matching gruppi, le serie temporali e le statistiche di gruppo sono calcolati
+// localmente in JS — il server non espone più endpoint di calcolo. Vedi
+// `localcompute.*` più sotto.
 const state = {
   serverUrl: "",
   accounts: [],         // [{id, account_number, holder_name, initial_balance, ...}]
@@ -17,6 +23,13 @@ const state = {
   groupsWorking: [],
   rulesDirty: false,
   groupsDirty: false,
+  // Compute cache: regex compilate + tag-set dei gruppi. Ricostruite ad ogni
+  // ricarica di rules/groups dal server.
+  compiledRules: [],    // [{rule, regex}]
+  compiledGroups: [],   // [{group, tagSet}]
+  // Tutte le transazioni di tutti i conti, ordinate per value_date asc.
+  // Caricate una sola volta al boot e ad ogni upload/refresh esplicito.
+  allTx: [],
   theme: "system",
   // AI
   aiMode: "claude-cli",
@@ -36,8 +49,6 @@ let chart = null;
 const TRASH_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
 const SAVE_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>';
 const RESET_ICON = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
-const txCache = new Map(); // key = `${date}|${accountsCsv}|${includeAuth}` -> [transactions]
-const txPending = new Set(); // richieste in corso
 
 // -------- Busy overlay (loader) --------
 // Contatore di operazioni async in corso. Se > 0 per più di 1s, mostriamo
@@ -169,13 +180,9 @@ function apiUrl(path) {
   return base + path;
 }
 
-// Cache GET: le risposte delle GET sono idempotenti fintanto che i filtri e
-// la config server non cambiano. Key = path completo (include i query string).
-// Invalidata esplicitamente al cambio filtri e dopo ogni scrittura.
-const apiCache = new Map();
-function invalidateApiCache() { apiCache.clear(); }
-
-// Wrapper comune: ogni chiamata HTTP è conteggiata dal busy tracker.
+// Tutte le chiamate HTTP sono conteggiate dal busy tracker. Niente cache:
+// l'unica GET "pesante" è /api/transactions/all e la facciamo una sola volta al
+// boot (e dopo upload/refresh esplicito). Tutto il resto è in memoria.
 async function apiFetch(path, init) {
   const r = await trackBusy(fetch(apiUrl(path), init));
   if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
@@ -183,36 +190,27 @@ async function apiFetch(path, init) {
 }
 
 async function apiGet(path) {
-  if (apiCache.has(path)) return apiCache.get(path);
-  const data = await apiFetch(path, { method: "GET" });
-  apiCache.set(path, data);
-  return data;
+  return await apiFetch(path, { method: "GET" });
 }
 
 async function apiPost(path, body) {
-  const data = await apiFetch(path, {
+  return await apiFetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  invalidateApiCache();
-  return data;
 }
 
 async function apiDelete(path) {
-  const data = await apiFetch(path, { method: "DELETE" });
-  invalidateApiCache();
-  return data;
+  return await apiFetch(path, { method: "DELETE" });
 }
 
 async function apiPut(path, body) {
-  const data = await apiFetch(path, {
+  return await apiFetch(path, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  invalidateApiCache();
-  return data;
 }
 
 async function apiUpload(file) {
@@ -220,7 +218,6 @@ async function apiUpload(file) {
   fd.append("file", file);
   const r = await trackBusy(fetch(apiUrl("/api/upload"), { method: "POST", body: fd }));
   if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`);
-  invalidateApiCache();
   return await r.json();
 }
 
@@ -255,37 +252,360 @@ function extractTimeFromDesc(s) {
   return m[1].replace(".", ":");
 }
 
-function txCacheKey(date) {
-  const ids = state.selectedIds.size < state.accounts.length
-    ? [...state.selectedIds].sort().join(",") : "all";
-  return `${date}|${ids}|${state.includeAuthorized ? 1 : 0}|${state.excludeTrading ? 1 : 0}`;
-}
+// ============================================================================
+// Local compute — porting in JS della logica che prima girava lato server.
+// ============================================================================
 
-function prefetchTransactions(date) {
-  const key = txCacheKey(date);
-  if (txCache.has(key) || txPending.has(key)) return;
-  txPending.add(key);
-  const params = new URLSearchParams({ date });
-  if (state.selectedIds.size < state.accounts.length) {
-    params.set("accounts", [...state.selectedIds].join(","));
+// Fineco wrappa la full_description a larghezza fissa inserendo uno spazio
+// spurio esattamente a posizione 40 dell'offset (e successivi multipli). Questo
+// rimuove SOLO quegli spazi e SOLO se sono fra due lettere (per non rompere
+// date, numeri, punteggiatura). Porting 1:1 di app/services/grouping.py:dewrap.
+const FINECO_WRAP_WIDTH = 40;
+function dewrap(text) {
+  if (!text) return "";
+  const chars = [...text]; // gestione corretta dei caratteri unicode
+  for (let pos = FINECO_WRAP_WIDTH; pos < chars.length; pos += FINECO_WRAP_WIDTH) {
+    if (chars[pos] !== " ") continue;
+    const left = pos - 1 >= 0 ? chars[pos - 1] : "";
+    const right = pos + 1 < chars.length ? chars[pos + 1] : "";
+    if (isAlpha(left) && isAlpha(right)) chars[pos] = "";
   }
-  if (state.includeAuthorized) params.set("include_authorized", "true");
-  if (state.excludeTrading) params.set("exclude_trading", "true");
-  fetch(apiUrl(`/api/transactions?${params.toString()}`))
-    .then(r => r.ok ? r.json() : [])
-    .then(list => {
-      txCache.set(key, list);
-      txPending.delete(key);
-      // Se il tooltip è ancora aperto su questa data, aggiorna
-      if (chart && chart.tooltip && chart.tooltip.getActiveElements().length > 0) {
-        chart.update("none");
-      }
-    })
-    .catch(() => { txPending.delete(key); });
+  return chars.join("");
+}
+function isAlpha(c) {
+  // Equivalente a Python str.isalpha() per un singolo char (lettere unicode).
+  return c.length > 0 && /^\p{L}$/u.test(c);
 }
 
-function getCachedTransactions(date) {
-  return txCache.get(txCacheKey(date));
+// Compila un pattern regex scritto in stile Python in una RegExp JS.
+// L'unico flag inline usato in seed/local_seed è (?i) (case-insensitive): lo
+// strippiamo dal pattern e impostiamo il flag JS `i`. Tutti gli altri costrutti
+// usati (\b, (?:…), (?=…), (?<!…)) sono già compatibili JS.
+// Se il pattern è invalido in JS, ritorna null e logga in console.
+function compilePyRegex(pattern) {
+  let src = String(pattern || "");
+  let flags = "";
+  // Cattura uno o più gruppi inline a inizio pattern (es. "(?i)", "(?im)").
+  const m = src.match(/^((?:\(\?[a-zA-Z]+\))+)/);
+  if (m) {
+    const inline = m[1];
+    src = src.slice(inline.length);
+    if (/i/.test(inline) && !flags.includes("i")) flags += "i";
+    if (/m/.test(inline) && !flags.includes("m")) flags += "m";
+    if (/s/.test(inline) && !flags.includes("s")) flags += "s";
+  }
+  try {
+    return new RegExp(src, flags);
+  } catch (e) {
+    console.warn(`[regex] pattern non compilabile in JS: ${pattern} — ${e.message}`);
+    return null;
+  }
+}
+
+// Compila la lista di tag-rules nello stesso ordine in cui il server le servirebbe
+// (priority asc, id asc — il server le ritorna già ordinate). Le regole con
+// pattern invalido vengono saltate (come faceva compiled_tag_rules in Python).
+function compileRules(rules) {
+  const out = [];
+  for (const r of rules || []) {
+    const rx = compilePyRegex(r.pattern);
+    if (!rx) continue;
+    out.push({ rule: r, regex: rx });
+  }
+  return out;
+}
+
+function compileGroups(groups) {
+  return (groups || []).map(g => ({ group: g, tagSet: new Set(g.tags || []) }));
+}
+
+// Ritorna i tag (deduped, ordinati per regola che ha matchato) per una tx,
+// usando description + (enriched_description ?? full_description). Porting di
+// services/grouping.py:compute_tags. La fonte estesa preferisce enriched
+// (es. merchant PayPal) a full_description (descrizione bancaria generica).
+function computeTags(tx, compiledRules) {
+  const desc = tx.description || "";
+  const extended = tx.enriched_description || tx.full_description || "";
+  const haystack = desc + " " + extended;
+  const dewrapped = desc + " " + dewrap(extended);
+  const seen = [];
+  const set = new Set();
+  for (const { rule, regex } of compiledRules) {
+    if (regex.test(haystack) || regex.test(dewrapped)) {
+      // .test() non interferisce coi flag perché non usiamo `g`
+      const t = rule.tag;
+      if (!set.has(t)) { set.add(t); seen.push(t); }
+    }
+  }
+  return seen;
+}
+
+// Ritorna l'id del primo gruppo compatibile (kind + tag-overlap), o null.
+// Porting di services/grouping.py:match_group.
+function matchGroup(amount, tags, compiledGroups) {
+  if (!tags || tags.length === 0) return null;
+  const tagSet = tags instanceof Set ? tags : new Set(tags);
+  const isIncome = amount > 0;
+  for (const { group, tagSet: gtags } of compiledGroups) {
+    if (group.kind === "income" && !isIncome) continue;
+    if (group.kind === "expense" && isIncome) continue;
+    for (const t of gtags) {
+      if (tagSet.has(t)) return group.id;
+    }
+  }
+  return null;
+}
+
+// Equivalente del filtro SQL `exclude_trading` (filters.py): match LIKE
+// case-insensitive su descrizione+full_description con un set di keyword.
+// NB: niente "compravendita" da sola — vedi commento in filters.py.
+const TRADING_KEYWORDS = ["titoli", "dividend", "cedol", "rimborso titoli"];
+function isTrading(tx) {
+  const blob = ((tx.description || "") + " " + (tx.full_description || "")).toLowerCase();
+  for (const kw of TRADING_KEYWORDS) {
+    if (blob.includes(kw)) return true;
+  }
+  return false;
+}
+
+// Applica i filtri "global" della UI: account selezionati, range date,
+// includeAuthorized, excludeTrading. Ritorna una nuova lista (non muta).
+function filterTx(tx, opts = {}) {
+  const {
+    selectedIds = state.selectedIds,
+    dateFrom = state.dateFrom,
+    dateTo = state.dateTo,
+    includeAuthorized = state.includeAuthorized,
+    excludeTrading = state.excludeTrading,
+  } = opts;
+  const useAccounts = selectedIds && selectedIds.size > 0 && selectedIds.size < state.accounts.length;
+  const out = [];
+  for (const t of tx) {
+    if (selectedIds && selectedIds.size === 0) return [];
+    if (useAccounts && !selectedIds.has(t.account_id)) continue;
+    if (!includeAuthorized && t.status === "Autorizzato") continue;
+    if (excludeTrading && isTrading(t)) continue;
+    if (dateFrom && t.value_date < dateFrom) continue;
+    if (dateTo && t.value_date > dateTo) continue;
+    out.push(t);
+  }
+  return out;
+}
+
+// Costruisce la serie temporale (cumulative o per-account) come faceva
+// /api/series. `tx` è già filtrata per accounts/includeAuthorized/excludeTrading
+// — il filtro di data lo applichiamo qui per poter "ancorare" la serie come fa
+// il backend (vedi commenti in routes/series.py).
+function computeSeries(tx, mode, dateFrom, dateTo) {
+  const accountsInfo = new Map();
+  for (const a of state.accounts) {
+    if (state.selectedIds.size > 0 && !state.selectedIds.has(a.id)) continue;
+    accountsInfo.set(a.id, a);
+  }
+  if (accountsInfo.size === 0) {
+    if (mode === "per-account") return { mode, accounts: [] };
+    return { mode: "cumulative", accounts: [], points: [] };
+  }
+
+  // Aggrego per (account_id, value_date) sommando le delta — stessa cosa che
+  // faceva il GROUP BY SQL. La tx è già filtrata per accounts/auth/trading.
+  const aggMap = new Map(); // account_id -> Map<date, deltaSum>
+  for (const a of accountsInfo.values()) aggMap.set(a.id, new Map());
+  for (const t of tx) {
+    const dayMap = aggMap.get(t.account_id);
+    if (!dayMap) continue;
+    dayMap.set(t.value_date, (dayMap.get(t.value_date) || 0) + Number(t.amount));
+  }
+  // by_account ordinato per data
+  const byAccount = new Map();
+  for (const [aid, dayMap] of aggMap) {
+    const arr = [...dayMap.entries()].sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+    byAccount.set(aid, arr);
+  }
+
+  if (mode === "per-account") {
+    const result = [];
+    for (const [aid, info] of accountsInfo) {
+      let running = Number(info.initial_balance || 0);
+      const points = [];
+      let started = false;
+      if (info.initial_balance_date) {
+        const sd = info.initial_balance_date;
+        if ((!dateFrom || sd >= dateFrom) && (!dateTo || sd <= dateTo)) {
+          points.push({ date: sd, balance: round2(running) });
+          started = true;
+        }
+      }
+      for (const [d, delta] of byAccount.get(aid) || []) {
+        running += delta;
+        if (dateTo && d > dateTo) break;
+        if (dateFrom && d < dateFrom) continue;
+        if (!started && dateFrom) {
+          points.push({ date: dateFrom, balance: round2(running) });
+          started = true;
+        }
+        points.push({ date: d, balance: round2(running) });
+      }
+      result.push({
+        account_id: aid,
+        account_number: info.account_number,
+        holder_name: info.holder_name,
+        initial_balance: info.initial_balance,
+        initial_balance_date: info.initial_balance_date,
+        points,
+      });
+    }
+    return { mode: "per-account", accounts: result };
+  }
+
+  // cumulative: somma dei saldi correnti di tutti i conti su tutte le date.
+  // Per ogni conto costruisco la serie completa (saldo running), poi forward-fill
+  // su tutte le date osservate e sommo. Stessa logica del backend.
+  const allDates = new Set();
+  const perAcc = new Map();
+  for (const [aid, info] of accountsInfo) {
+    let running = Number(info.initial_balance || 0);
+    const series = [];
+    if (info.initial_balance_date) {
+      series.push([info.initial_balance_date, running]);
+      allDates.add(info.initial_balance_date);
+    }
+    for (const [d, delta] of byAccount.get(aid) || []) {
+      running += delta;
+      series.push([d, running]);
+      allDates.add(d);
+    }
+    perAcc.set(aid, series);
+  }
+  const sortedDates = [...allDates].sort();
+  const idx = new Map(); for (const aid of perAcc.keys()) idx.set(aid, 0);
+  const lastValue = new Map(); for (const aid of perAcc.keys()) lastValue.set(aid, 0);
+  const points = [];
+  for (const d of sortedDates) {
+    let total = 0;
+    for (const [aid, series] of perAcc) {
+      let i = idx.get(aid);
+      while (i < series.length && series[i][0] <= d) {
+        lastValue.set(aid, series[i][1]);
+        i++;
+      }
+      idx.set(aid, i);
+      total += lastValue.get(aid);
+    }
+    if (dateFrom && d < dateFrom) continue;
+    if (dateTo && d > dateTo) continue;
+    points.push({ date: d, balance: round2(total) });
+  }
+  return {
+    mode: "cumulative",
+    accounts: [...accountsInfo.values()].map(info => ({
+      account_id: info.id, account_number: info.account_number, holder_name: info.holder_name,
+    })),
+    points,
+  };
+}
+
+// Aggrega le tx filtrate per gruppo (count, totale, scomposizione income/expense)
+// + bucket "non classificati" entrate/uscite. Stesso shape che ritornava
+// /api/group-stats. `tx` è già filtrata per accounts/auth/trading/dateRange.
+function computeGroupStats(tx) {
+  const cRules = state.compiledRules;
+  const cGroups = state.compiledGroups;
+  const stats = new Map(); // gid -> entry
+  for (const { group, tagSet } of cGroups) {
+    stats.set(group.id, {
+      id: group.id, name: group.name, kind: group.kind, tags: [...tagSet].sort(),
+      count: 0, total: 0,
+      income_total: 0, expense_abs_total: 0,
+      income_count: 0, expense_count: 0,
+    });
+  }
+  const uncIn = { count: 0, total: 0 };
+  const uncOut = { count: 0, total: 0 };
+
+  for (const t of tx) {
+    const amount = Number(t.amount);
+    const tags = computeTags(t, cRules);
+    const gid = matchGroup(amount, tags, cGroups);
+    if (gid == null) {
+      const b = amount >= 0 ? uncIn : uncOut;
+      b.count += 1; b.total += amount;
+      continue;
+    }
+    const s = stats.get(gid);
+    s.count += 1;
+    s.total += amount;
+    if (amount >= 0) { s.income_total += amount; s.income_count += 1; }
+    else             { s.expense_abs_total += -amount; s.expense_count += 1; }
+  }
+
+  for (const s of stats.values()) {
+    s.total = round2(s.total);
+    s.income_total = round2(s.income_total);
+    s.expense_abs_total = round2(s.expense_abs_total);
+  }
+  uncIn.total = round2(uncIn.total);
+  uncOut.total = round2(uncOut.total);
+
+  return {
+    groups: [...stats.values()],
+    uncategorized: { count: uncIn.count + uncOut.count, total: round2(uncIn.total + uncOut.total) },
+    uncategorized_income: uncIn,
+    uncategorized_expense: uncOut,
+  };
+}
+
+// Ritorna le tx in una data esatta, applicando i filtri correnti. Usata dal
+// tooltip del grafico cumulativo/per-account.
+function txOnDate(date) {
+  const filtered = filterTx(state.allTx);
+  return filtered.filter(t => t.value_date === date);
+}
+
+// Drill-down: tx di un gruppo (o non classificate). Sostituisce la query
+// /api/transactions?group_id=X. `meta` ha la stessa shape che usava openDrill.
+function txForDrill(meta) {
+  // Per il drill di un gruppo "trading" non escludiamo trading (vedi commento
+  // originale in openDrill).
+  const isTradingGroup = (meta.tags || []).includes("trading");
+  let tx = filterTx(state.allTx, {
+    excludeTrading: state.excludeTrading && !isTradingGroup,
+  });
+
+  const cRules = state.compiledRules;
+  const cGroups = state.compiledGroups;
+  const out = [];
+  for (const t of tx) {
+    const tags = computeTags(t, cRules);
+    const gid = matchGroup(Number(t.amount), tags, cGroups);
+    if (meta.id === 0) {
+      // Non classificate
+      if (gid != null) continue;
+      if (meta.uncategorized_kind === "income" && t.amount < 0) continue;
+      if (meta.uncategorized_kind === "expense" && t.amount >= 0) continue;
+    } else if (gid !== meta.id) {
+      continue;
+    }
+    // Includo i tag calcolati per coerenza con la vecchia API
+    out.push({ ...t, tags });
+  }
+  // Stesso ordinamento di prima: value_date desc, |amount| desc
+  out.sort((a, b) => {
+    if (a.value_date !== b.value_date) return a.value_date < b.value_date ? 1 : -1;
+    return Math.abs(b.amount) - Math.abs(a.amount);
+  });
+  return out;
+}
+
+// Tx di trading per il P&L panel: accounts + range date + includeAuthorized,
+// SOLO trading (opposto del filtro excludeTrading). Sostituisce
+// /api/trading-transactions.
+function tradingTx() {
+  const filtered = filterTx(state.allTx, { excludeTrading: false });
+  return filtered.filter(t => isTrading(t)).sort((a, b) => {
+    if (a.value_date !== b.value_date) return a.value_date < b.value_date ? -1 : 1;
+    return a.id - b.id;
+  });
 }
 
 // -------- Settings --------
@@ -389,20 +709,53 @@ async function saveSettings() {
   await refreshAll();
 }
 
-// -------- Accounts --------
-async function reloadAccounts() {
+// -------- Bootstrap (config + transactions) --------
+
+// Carica accounts + tag-rules + groups in un solo round-trip. Sincronizza
+// state.selectedIds e ricompila regex+gruppi. È la "config leggera": NON tocca
+// state.allTx. Usata sia al boot iniziale sia dopo le mutation di rules/groups
+// (che non modificano le transazioni in DB).
+async function bootstrapConfig() {
   if (!state.serverUrl) return;
-  state.accounts = await apiGet("/api/accounts");
-  // se nessun conto è selezionato, seleziono tutti
+  const cfg = await apiGet("/api/config");
+  state.accounts = cfg.accounts || [];
+  state.rules = cfg.tag_rules || [];
+  state.groups = cfg.groups || [];
+  state.rulesWorking = cloneRules(state.rules);
+  state.groupsWorking = cloneGroups(state.groups);
+  state.rulesDirty = false;
+  state.groupsDirty = false;
+  state.compiledRules = compileRules(state.rules);
+  state.compiledGroups = compileGroups(state.groups);
+
+  // Selezione conti: la prima volta seleziono tutti; ai refresh successivi
+  // mantengo la selezione esistente ma rimuovo gli id spariti (account cancellati).
   if (state.selectedIds.size === 0) {
     state.accounts.forEach(a => state.selectedIds.add(a.id));
   } else {
-    // rimuovo id che non esistono più
     const existing = new Set(state.accounts.map(a => a.id));
     [...state.selectedIds].forEach(id => { if (!existing.has(id)) state.selectedIds.delete(id); });
   }
   renderAccountPicker();
   syncDateInputs();
+  renderRulesTable();
+  renderGroupsTable();
+  updateSaveButtons();
+}
+
+// Carica TUTTE le transazioni in memoria (state.allTx). È la chiamata "pesante"
+// — il busy overlay globale la copre. Usata al boot iniziale, dopo upload, e dal
+// pulsante "Ricarica".
+async function bootstrapTransactions() {
+  if (!state.serverUrl) return;
+  state.allTx = await apiGet("/api/transactions/all");
+}
+
+// Reload solo della config (rules/groups/accounts). Le tx in memoria non
+// cambiano. Chiamato dopo POST /api/tag-rules, /api/groups, /api/seed.
+async function reloadServerConfig() {
+  if (!state.serverUrl) return;
+  await bootstrapConfig();
 }
 
 function syncDateInputs() {
@@ -457,8 +810,6 @@ function renderAccountPicker() {
     chip.onclick = () => {
       if (state.selectedIds.has(a.id)) state.selectedIds.delete(a.id);
       else state.selectedIds.add(a.id);
-      txCache.clear();
-      invalidateApiCache();
       renderAccountPicker();
       syncDateInputs();
       refreshChart();
@@ -536,39 +887,21 @@ function showUploadResult(res) {
 }
 
 // -------- Chart --------
-function queryArgs() {
-  const params = new URLSearchParams();
-  // Se l'utente ha deselezionato alcuni (o tutti) i conti passo la lista esatta.
-  // Omesso solo quando TUTTI i conti sono selezionati (server default = tutti).
-  if (state.selectedIds.size < state.accounts.length) {
-    params.set("accounts", [...state.selectedIds].join(","));
-  }
-  if (state.includeAuthorized) params.set("include_authorized", "true");
-  if (state.excludeTrading) params.set("exclude_trading", "true");
-  if (state.dateFrom) params.set("date_from", state.dateFrom);
-  if (state.dateTo) params.set("date_to", state.dateTo);
-  const s = params.toString();
-  return s ? ("?" + s) : "";
-}
-
-async function refreshChart() {
+function refreshChart() {
   if (!state.serverUrl) { showChart(false); return; }
   if (state.accounts.length === 0) { showChart(false); return; }
 
-  // P&L trading in parallelo al render del grafico
   refreshTradingPnl();
 
   // Vista "groups" mostra il pannello CRUD gruppi + bar chart dei gruppi
   if (state.view === "groups") {
     $("#groups-panel").classList.remove("hidden");
-    await renderBarChart();
+    renderBarChart();
     return;
-  } else {
-    $("#groups-panel").classList.add("hidden");
-    closeDrill();
   }
-
-  await renderLineChart();
+  $("#groups-panel").classList.add("hidden");
+  closeDrill();
+  renderLineChart();
 }
 
 // Parse una riga "Compravendita Titoli BTP-1OT54 4,3% Qta/Val.nom. 10000,000000"
@@ -671,44 +1004,32 @@ function computeTradingPnl(rows) {
 
 function round2(n) { return Math.round(n * 100) / 100; }
 
-async function refreshTradingPnl() {
+function refreshTradingPnl() {
   const el = $("#trading-pnl");
   if (!el) return;
   if (!state.serverUrl || state.accounts.length === 0 || state.selectedIds.size === 0) {
     el.classList.add("hidden");
     return;
   }
-  const params = new URLSearchParams();
-  if (state.selectedIds.size < state.accounts.length) {
-    params.set("accounts", [...state.selectedIds].join(","));
-  }
-  if (state.includeAuthorized) params.set("include_authorized", "true");
-  if (state.dateFrom) params.set("date_from", state.dateFrom);
-  if (state.dateTo) params.set("date_to", state.dateTo);
-  const q = params.toString();
-  try {
-    const rows = await apiGet(`/api/trading-transactions${q ? "?" + q : ""}`);
-    if (!rows.length) {
-      el.classList.add("hidden");
-      return;
-    }
-    const pnl = computeTradingPnl(rows);
-    const cls = pnl.realized >= 0 ? "value-positive" : "value-negative";
-    const sign = pnl.realized >= 0 ? "+" : "";
-    el.className = `trading-pnl ${cls}`;
-    const investedNote = pnl.open_invested > 0
-      ? ` <span class="hint">· ${fmtEur(pnl.open_invested)} ancora investito</span>`
-      : "";
-    el.innerHTML = `Trading P&amp;L: <strong>${sign}${fmtEur(pnl.realized)}</strong> <span class="hint">(${pnl.count} mov.)</span>${investedNote}`;
-    el.title = `Realizzato: ${fmtEur(pnl.realized)}\n` +
-               `  • Compra/vendi chiuse: ${fmtEur(pnl.realized_core)}\n` +
-               `  • Cedole/dividendi: ${fmtEur(pnl.coupons)}\n` +
-               `  • Bolli/imposte: ${fmtEur(pnl.fees)}\n` +
-               (pnl.other ? `  • Altre: ${fmtEur(pnl.other)}\n` : "") +
-               `Capitale ancora investito (non conteggiato): ${fmtEur(pnl.open_invested)}`;
-  } catch (e) {
+  const rows = tradingTx();
+  if (!rows.length) {
     el.classList.add("hidden");
+    return;
   }
+  const pnl = computeTradingPnl(rows);
+  const cls = pnl.realized >= 0 ? "value-positive" : "value-negative";
+  const sign = pnl.realized >= 0 ? "+" : "";
+  el.className = `trading-pnl ${cls}`;
+  const investedNote = pnl.open_invested > 0
+    ? ` <span class="hint">· ${fmtEur(pnl.open_invested)} ancora investito</span>`
+    : "";
+  el.innerHTML = `Trading P&amp;L: <strong>${sign}${fmtEur(pnl.realized)}</strong> <span class="hint">(${pnl.count} mov.)</span>${investedNote}`;
+  el.title = `Realizzato: ${fmtEur(pnl.realized)}\n` +
+             `  • Compra/vendi chiuse: ${fmtEur(pnl.realized_core)}\n` +
+             `  • Cedole/dividendi: ${fmtEur(pnl.coupons)}\n` +
+             `  • Bolli/imposte: ${fmtEur(pnl.fees)}\n` +
+             (pnl.other ? `  • Altre: ${fmtEur(pnl.other)}\n` : "") +
+             `Capitale ancora investito (non conteggiato): ${fmtEur(pnl.open_invested)}`;
 }
 
 function showChart(visible) {
@@ -719,14 +1040,15 @@ function setTabsVisible(visible) {
   $(".view-tabs").classList.toggle("hidden", !visible);
 }
 
-async function renderLineChart() {
+function renderLineChart() {
   const mode = state.view === "per-account" ? "per-account" : "cumulative";
-  const q = queryArgs();
-  const sep = q ? "&" : "?";
-  const url = `/api/series${q}${sep}mode=${mode}`;
-  let data;
-  try { data = await apiGet(url); }
-  catch (e) { setStatus("Errore caricamento serie: " + e.message, "err"); showChart(false); return; }
+  // computeSeries gestisce internamente il filtro data: il running balance
+  // deve includere TUTTE le delta (anche quelle prima di dateFrom) per ancorare
+  // correttamente il saldo iniziale, e i punti emessi vengono filtrati per
+  // range alla fine. Quindi qui passiamo le tx filtrate per accounts/auth/
+  // trading SENZA il filtro di data.
+  const filtered = filterTx(state.allTx, { dateFrom: "", dateTo: "" });
+  const data = computeSeries(filtered, mode, state.dateFrom, state.dateTo);
 
   const datasets = [];
   if (data.mode === "cumulative") {
@@ -783,11 +1105,7 @@ async function renderLineChart() {
               if (!items || items.length === 0) return "";
               const raw = items[0].raw;
               const date = typeof raw.x === "string" ? raw.x : new Date(raw.x).toISOString().slice(0, 10);
-              const txs = getCachedTransactions(date);
-              if (txs === undefined) {
-                prefetchTransactions(date);
-                return ["", "Movimenti: caricamento…"];
-              }
+              const txs = txOnDate(date);
               if (txs.length === 0) return ["", "Nessun movimento in questa data"];
               const lines = ["", `Movimenti (${txs.length}):`];
               const multiAccount = state.selectedIds.size > 1;
@@ -837,11 +1155,9 @@ async function renderLineChart() {
   }
 }
 
-async function renderBarChart() {
-  const q = queryArgs();
-  let data;
-  try { data = await apiGet(`/api/group-stats${q}`); }
-  catch (e) { setStatus("Errore caricamento gruppi: " + e.message, "err"); showChart(false); return; }
+function renderBarChart() {
+  const filtered = filterTx(state.allTx);
+  const data = computeGroupStats(filtered);
 
   const visible = data.groups.filter(g => g.count > 0);
   const labels = visible.map(g => g.name);
@@ -970,40 +1286,18 @@ function gridColor() {
 }
 
 // -------- Drill-down (dettaglio gruppo) --------
-async function openDrill(meta) {
+function openDrill(meta) {
   const panel = $("#drill-panel");
-  const tbody = $("#drill-table tbody");
   const title = $("#drill-title");
-  const summary = $("#drill-summary");
 
   state.activeDrillMeta = meta;
   title.textContent = meta.name;
-  summary.textContent = `${meta.count} movimenti · totale ${fmtEur(meta.total)} · caricamento…`;
-  tbody.innerHTML = "";
   panel.classList.remove("hidden");
   panel.scrollIntoView({ behavior: "smooth", block: "start" });
 
-  const params = new URLSearchParams();
-  params.set("group_id", String(meta.id));
-  if (meta.uncategorized_kind) params.set("uncategorized_kind", meta.uncategorized_kind);
-  params.set("limit", "2000");
-  if (state.selectedIds.size < state.accounts.length) {
-    params.set("accounts", [...state.selectedIds].join(","));
-  }
-  if (state.includeAuthorized) params.set("include_authorized", "true");
-  // Non applico exclude_trading ai gruppi di trading: saremmo in contraddizione
-  // Se il gruppo contiene il tag 'trading', il drill vuole vedere proprio quelle tx
-  const isTradingGroup = (meta.tags || []).includes("trading");
-  if (state.excludeTrading && !isTradingGroup) params.set("exclude_trading", "true");
-  if (state.dateFrom) params.set("date_from", state.dateFrom);
-  if (state.dateTo) params.set("date_to", state.dateTo);
-
-  try {
-    const rows = await apiGet(`/api/transactions?${params.toString()}`);
-    renderDrillRows(rows, meta);
-  } catch (e) {
-    summary.textContent = "Errore: " + e.message;
-  }
+  // Tutto in memoria: niente loading state, niente try/catch.
+  const rows = txForDrill(meta);
+  renderDrillRows(rows, meta);
 }
 
 function renderDrillRows(rows, meta) {
@@ -1071,23 +1365,6 @@ function cloneGroups(groups) {
   return groups.map(g => ({ id: g.id, name: g.name, kind: g.kind, priority: g.priority, tags: [...(g.tags || [])] }));
 }
 
-async function reloadServerConfig() {
-  if (!state.serverUrl) return;
-  const [rules, groups] = await Promise.all([
-    apiGet("/api/tag-rules"),
-    apiGet("/api/groups"),
-  ]);
-  state.rules = rules;
-  state.groups = groups;
-  state.rulesWorking = cloneRules(rules);
-  state.groupsWorking = cloneGroups(groups);
-  state.rulesDirty = false;
-  state.groupsDirty = false;
-  renderRulesTable();
-  renderGroupsTable();
-  updateSaveButtons();
-}
-
 function updateSaveButtons() {
   $("#save-rules-btn").disabled = !state.rulesDirty;
   $("#save-groups-btn").disabled = !state.groupsDirty;
@@ -1138,12 +1415,16 @@ function addRuleRow() {
 }
 
 async function saveRules() {
-  // Validazione client: solo campi obbligatori. La compilazione regex la fa
-  // il server (Python) — i pattern supportano costrutti come (?i) che JS non
-  // accetta, quindi new RegExp() qui darebbe falsi negativi.
+  // Validazione client: campi obbligatori + compilazione regex. Il server è
+  // dumb storage e non valida più — se una regex è invalida sarebbe persistita
+  // e poi scartata silenziosamente da compileRules() al prossimo bootstrap.
   for (const r of state.rulesWorking) {
     if (!r.name || !r.pattern || !r.tag) {
       setStatus("Tutte le regole devono avere nome, regex e tag", "err");
+      return;
+    }
+    if (compilePyRegex(r.pattern) === null) {
+      setStatus(`Regex non valida in "${r.name}"`, "err");
       return;
     }
   }
@@ -1610,18 +1891,21 @@ async function refreshAll() {
     return;
   }
   try {
-    await reloadAccounts();
-    await reloadServerConfig();
-    const hasData = state.accounts.length > 0;
-    setTabsVisible(hasData);
-    $("#toolbar").classList.toggle("hidden", !hasData);
-    if (hasData) {
-      await refreshChart();
-    } else {
+    // Bootstrap doppio: prima la config (leggera, popola UI), poi le transazioni
+    // (la chiamata grossa). Entrambe sotto busy overlay tramite trackBusy.
+    await bootstrapConfig();
+    const hasAccounts = state.accounts.length > 0;
+    setTabsVisible(hasAccounts);
+    $("#toolbar").classList.toggle("hidden", !hasAccounts);
+    if (!hasAccounts) {
+      state.allTx = [];
       showChart(false);
       $("#groups-panel").classList.add("hidden");
       setStatus("Nessun conto presente. Carica un file per iniziare.", "warn");
+      return;
     }
+    await bootstrapTransactions();
+    refreshChart();
   } catch (e) {
     setStatus("Errore server: " + e.message, "err");
     $("#toolbar").classList.add("hidden");
@@ -1652,12 +1936,12 @@ async function init() {
   $("#test-connection-btn").onclick = testConnection;
   $("#ai-mode-select").onchange = updateAiFieldsVisibility;
   $("#theme-toggle").onclick = cycleTheme;
-  $("#refresh-btn").onclick = () => { invalidateApiCache(); txCache.clear(); refreshAll(); };
-  $("#include-authorized").onchange = (e) => { state.includeAuthorized = e.target.checked; txCache.clear(); invalidateApiCache(); refreshChart(); };
-  $("#exclude-trading").onchange = (e) => { state.excludeTrading = e.target.checked; txCache.clear(); invalidateApiCache(); refreshChart(); };
+  $("#refresh-btn").onclick = () => refreshAll();
+  $("#include-authorized").onchange = (e) => { state.includeAuthorized = e.target.checked; refreshChart(); };
+  $("#exclude-trading").onchange = (e) => { state.excludeTrading = e.target.checked; refreshChart(); };
   $("#exclude-trading").checked = state.excludeTrading;
-  $("#date-from").onchange = (e) => { state.dateFrom = e.target.value; invalidateApiCache(); refreshChart(); };
-  $("#date-to").onchange = (e) => { state.dateTo = e.target.value; invalidateApiCache(); refreshChart(); };
+  $("#date-from").onchange = (e) => { state.dateFrom = e.target.value; refreshChart(); };
+  $("#date-to").onchange = (e) => { state.dateTo = e.target.value; refreshChart(); };
   $("#drill-close").onclick = closeDrill;
   $("#add-rule-btn").onclick = addRuleRow;
   $("#save-rules-btn").onclick = saveRules;
@@ -1665,9 +1949,8 @@ async function init() {
   $("#save-groups-btn").onclick = saveGroups;
   $("#reset-seed-btn").onclick = resetSeed;
   $("#reload-config-btn").onclick = async () => {
-    invalidateApiCache();
     await reloadServerConfig();
-    await refreshChart();
+    refreshChart();
     setStatus("Configurazione ricaricata dal server", "ok");
   };
 

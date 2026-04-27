@@ -1,8 +1,18 @@
 # Server agent guide
 
-FastAPI + SQLite per l'ingestione di estratti bancari xlsx e la loro classificazione
-tramite tag-rules e gruppi configurabili. Target runtime: Python 3.9+ su Raspberry Pi
+FastAPI + SQLite per l'ingestione di estratti bancari xlsx/CSV e la persistenza
+di tag-rules e gruppi configurabili. Target runtime: Python 3.9+ su Raspberry Pi
 `armhf` (solo wheel binari, niente compilazione).
+
+**Architettura: il server è "dumb storage"**. Espone l'ingest dei file e il CRUD
+di accounts/tag-rules/groups, e fornisce due endpoint di lettura "bulk"
+(`/api/config`, `/api/transactions/all`) che scaricano tutto. Tutto il calcolo
+(filtri, tagging, matching gruppi, serie temporali, statistiche) avviene **lato
+client** in JavaScript. Vedi `client/AGENTS.md`.
+
+Storicamente esistevano endpoint server-side per il calcolo (`/api/series`,
+`/api/group-stats`, `/api/transactions` con filtri, `/api/trading-transactions`):
+sono stati eliminati perché su Raspberry Pi armhf erano il collo di bottiglia.
 
 ## Layout
 
@@ -15,18 +25,21 @@ tramite tag-rules e gruppi configurabili. Target runtime: Python 3.9+ su Raspber
   per regex/gruppi specifici del singolo utente (cognomi, commercianti locali, ecc.).
   Vedi `app/local_seed.py.example` per il formato. Se il file esiste, `apply_seed()`
   lo carica e lo unisce: regole appese, gruppi merge-by-name (append tag).
-- `app/filters.py` — clausola SQL `LIKE` per `exclude_trading` (filtro alternativo
-  ai tag, usato su `/api/series`, `/api/group-stats`, `/api/transactions`)
 - `app/parsers/` — parser per i template xlsx. Oggi solo `fineco.py`; il
-  `__init__.py` contiene il registry con `detect()`/`parse()`.
+  `__init__.py` contiene il registry con `detect()`/`parse()`. Per i CSV PayPal,
+  `app/parsers/paypal.py`.
 - `app/services/ingest.py` — insert idempotente delle transazioni (dedup-hash con
   ordinale per righe identiche: una tx "VISA DEBIT 46,28 EUR" che appare 2 volte
   nello stesso giorno non viene deduplicata)
-- `app/services/grouping.py` — tre funzioni:
-  - `dewrap()` compensa gli spazi spuri di Fineco a posizione 40 (vedi sotto)
-  - `compute_tags()` applica tutte le `tag_rules`, restituisce lista ordinata di tag
-  - `match_group()` trova il primo gruppo compatibile (kind + tag-overlap) per una tx
-- `app/routes/*` — route FastAPI (vedi README del repo per elenco endpoint)
+- `app/services/paypal.py` — ingest e match del CSV PayPal (riempie
+  `transactions.enriched_description` con il merchant reale)
+- `app/routes/bootstrap.py` — `/api/config` e `/api/transactions/all` (i due
+  endpoint di lettura bulk consumati al boot dal client)
+- `app/routes/accounts.py` — `DELETE /api/accounts/{id}`
+- `app/routes/groups.py` — CRUD tag-rules + groups + `/api/tags` + `/api/seed`.
+  **Nota:** il server NON valida i pattern regex (delegato al client JS che è
+  l'unico consumatore e li compila per davvero).
+- `app/routes/upload.py` — `POST /api/upload`
 
 ## Schema DB
 
@@ -81,10 +94,11 @@ con uno spazio spurio **esattamente a posizione 40 dell'offset**. Esempi:
 - `PROF UMERIA` → `PROFUMERIA`
 - `Nes suna Commissione` → `Nessuna Commissione`
 
-`dewrap()` rimuove questi spazi *solo* in posizione 40 e solo se sono tra due lettere
-(per non rompere date, numeri, punteggiatura). Non modifica il DB: viene applicata al
-volo quando si testa una regex. Il tooltip e la tabella drill-down mostrano sempre
-la descrizione originale.
+Il `dewrap()` rimuove questi spazi *solo* in posizione 40 e solo se sono tra due
+lettere (per non rompere date, numeri, punteggiatura). **Implementato lato
+client** (`client/src/main.js`): viene applicato al volo quando si testa una
+regex contro `full_description`/`enriched_description`. Non modifica mai il DB.
+Il tooltip e la tabella drill-down mostrano sempre la descrizione originale.
 
 Limiti:
 - Spazi spuri dopo la posizione 40 non sono deterministici (non a intervalli regolari)
@@ -93,6 +107,13 @@ Limiti:
 - Il wrap si applica solo a `full_description`; `description` (corta) non lo subisce.
 
 ## Convenzioni sulla scrittura delle regex
+
+Le regex stanno in `seed.py` / `local_seed.py` in stile Python ma vengono usate
+**solo dal client JS**. Il client le compila con un piccolo shim
+(`compilePyRegex` in `main.js`) che strippa i flag inline `(?i)`/`(?m)`/`(?s)` e
+li rimette come flag JS. Tutti gli altri costrutti usati (`\b`, `(?:…)`, `(?=…)`,
+`(?<!…)`) sono già compatibili JS — verificare che eventuali pattern nuovi non
+introducano costrutti Python-only (named groups `(?P<…>…)` ecc.).
 
 - Usare `\b` per le parole comuni che potrebbero essere sottostringhe: `\bpub\b`,
   `\bconad\b`, `\bbar[-\s]+[a-z]`
@@ -104,14 +125,15 @@ Limiti:
 - Il tag `trading` NON deve matchare `compravendita` da sola: `"SALDO IMMOBILE OGGETTO
   DI COMPRAVENDITA"` fu un falso positivo. Oggi la regex richiede `compravendita\s+titoli`
   o parole tipicamente da trading.
-- Lo stesso vale per il filtro SQL `exclude_trading` in `app/filters.py`: niente
-  keyword `compravendita` da sola.
+- Lo stesso vale per il filtro `excludeTrading` lato client (`isTrading()` in
+  `main.js`, vedi `TRADING_KEYWORDS`): niente keyword `compravendita` da sola.
 
 ## Movimenti "Autorizzato"
 
 Le righe con `status='Autorizzato'` sono pre-contabilizzazioni (tipicamente duplicate
-da una riga "Contabilizzato" pochi giorni dopo). Sono salvate in DB ma escluse di
-default dalle query (toggle client: "Includi movimenti autorizzati"). Vengono
+da una riga "Contabilizzato" pochi giorni dopo). Sono salvate in DB e **scaricate
+sempre dal client** via `/api/transactions/all`. Il filtro è applicato lato client
+(toggle "Includi movimenti autorizzati" → `state.includeAuthorized`). Vengono
 **sempre** dedupate tramite `dedup_hash` anche tra Autorizzato e Contabilizzato.
 
 ## Run / deploy
@@ -128,13 +150,19 @@ fallirebbe; con i wheel armv7l esistenti su PyPI va tutto liscio.
 
 ## Troubleshooting
 
-- **"Non vedo un movimento che mi aspetto"** → controlla il filtro `exclude_trading`
-  (ON di default) e `include_authorized` (OFF di default). In alternativa interroga
-  `GET /api/transactions?date=YYYY-MM-DD&limit=50` per vedere cosa c'è e quali tag
-  vengono assegnati.
-- **"Una tx è nel gruppo sbagliato"** → i tag vengono decisi dalle regole (`/api/tag-rules`),
-  il gruppo dall'ordine di `priority` su `/api/groups`. Due cose da verificare:
-  (a) la tx ha i tag che ti aspetti? (b) c'è un gruppo con `priority` più bassa che
-  la cattura prima di quello voluto?
+- **"Non vedo un movimento che mi aspetto"** → la lista che il client ha in
+  memoria contiene tutte le tx (tutte le date, tutti gli stati). Se manca:
+  controlla in DB direttamente (`SELECT * FROM transactions WHERE …`). Se è in
+  DB ma non nel grafico, sono i filtri client `excludeTrading` (ON di default) o
+  `includeAuthorized` (OFF di default) o il range date.
+- **"Una tx è nel gruppo sbagliato"** → i tag vengono decisi dalle regole, il
+  gruppo dall'ordine di `priority`. Tutto il calcolo è in `client/src/main.js`
+  (`computeTags`, `matchGroup`). Verifica: (a) la tx ha i tag che ti aspetti?
+  (b) c'è un gruppo con `priority` più bassa che la cattura prima di quello
+  voluto?
 - **"Dopo un reset ho perso le mie regole custom"** → `POST /api/seed` è un wipe
   **totale** di tag_rules+groups+group_tags, non un "merge". Nota nel README/UI.
+- **"Una regex funziona in seed.py ma il client non la rispetta"** → controlla
+  che il client riesca a compilarla in JS (apri DevTools sulla console: il
+  porting JS logga `[regex] pattern non compilabile in JS: …`). Costrutti
+  Python-only come `(?P<…>…)` non sono supportati.

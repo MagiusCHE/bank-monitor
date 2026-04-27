@@ -37,7 +37,9 @@ Config utente (URL server + tema + dimensioni finestra) persistito in
   il DOM direttamente.
 - Due `loadConfig` **distinte** (attenzione a NON confonderle):
   - `loadConfig()` — legge URL server + tema dal file config locale (Rust) o localStorage
-  - `reloadServerConfig()` — legge tag-rules e groups dal server REST (/api/*)
+  - `reloadServerConfig()` — alias di `bootstrapConfig()`, ricarica accounts +
+    tag-rules + groups dal server (NON le transazioni — quelle restano in
+    memoria fino a un upload o refresh esplicito)
   Storicamente una shadowava l'altra quando le avevo chiamate entrambe `loadConfig` →
   tema + URL non si applicavano. Non rinominare a caso.
 - Tre viste principali: `cumulative`, `per-account`, `groups`. La vista `groups`
@@ -46,6 +48,51 @@ Config utente (URL server + tema + dimensioni finestra) persistito in
 - Dirty tracking dei form di regole/gruppi: il bottone "Salva modifiche" è disabilitato
   finché non cambi qualcosa, poi chiama `POST /api/*/bulk` che sostituisce
   atomicamente l'intera lista.
+
+## Architettura: tutto il calcolo è lato client
+
+Il server è "dumb storage". Al boot scarichiamo tutto in memoria con due GET:
+
+1. `bootstrapConfig()` → `GET /api/config` (accounts + tag-rules + groups). UI
+   utilizzabile, ma niente grafico ancora.
+2. `bootstrapTransactions()` → `GET /api/transactions/all` (TUTTE le tx di tutti
+   i conti, una volta sola). Sotto busy overlay perché può essere "pesante".
+
+Da quel momento in poi, tutto il filtraggio/tagging/grouping/serie temporale è
+calcolato in JS leggendo da `state.allTx`. Le funzioni-chiave (sezione
+"Local compute" in `main.js`):
+
+- `compilePyRegex(pattern)` — strip dei flag inline `(?i)`/`(?m)`/`(?s)` Python e
+  compilazione `new RegExp` con i flag JS equivalenti
+- `compileRules(rules)` / `compileGroups(groups)` — riempiono
+  `state.compiledRules` / `state.compiledGroups`
+- `dewrap(text)` — porting 1:1 del fix Fineco (vedi `server/AGENTS.md`)
+- `computeTags(tx, compiledRules)` — tag deduped, ordinati per regola
+- `matchGroup(amount, tags, compiledGroups)` — primo gruppo compatibile, o null
+- `isTrading(tx)` — keyword-match (sostituisce il `LIKE` SQL)
+- `filterTx(tx, opts)` — applica selectedIds + range data + auth + trading
+- `computeSeries(filteredTx, mode, dateFrom, dateTo)` — cumulative o per-account
+- `computeGroupStats(filteredTx)` — count/total per gruppo + non classificati
+- `txOnDate(date)`, `txForDrill(meta)`, `tradingTx()` — query specifiche
+
+**Trabocchetto noto** (testato a parità sul DB reale): `computeSeries` deve
+ricevere tx **filtrate per accounts/auth/trading ma NON per data**. Il running
+balance accumula da tutte le delta storiche, e il filtro range viene applicato
+solo all'output (così il primo punto in range è "ancorato" al saldo corretto).
+
+## Quando rifare bootstrap delle transazioni
+
+Le tx in memoria restano valide finché il DB non cambia. Le situazioni in cui
+serve rifare `bootstrapTransactions()`:
+
+- Dopo un upload (`onFileSelected` chiama `refreshAll()` che fa entrambi)
+- Dopo `DELETE /api/accounts/{id}` (idem, via `refreshAll()`)
+- Click manuale su "Ricarica" nel toolbar → `refreshAll()`
+
+NON serve dopo: salva regole, salva gruppi, reset seed, "+ Tag" da drill,
+applica suggerimento AI. Quei flussi cambiano solo `tag_rules`/`groups` (config),
+quindi chiamano solo `reloadServerConfig()` + `refreshChart()` — `state.allTx`
+resta invariato e i tag vengono ricalcolati al volo da `computeTags()`.
 
 ## Dettagli del bar chart (vista Gruppi)
 
@@ -65,16 +112,19 @@ Il click su una barra apre il drill-down (`openDrill`) via `GET /api/transaction
 
 ## Interazione con server: chi ricarica quando
 
-Le regole di tagging e i gruppi NON sono cachate lato client: vengono ricaricati con
-`reloadServerConfig()` ogni volta che:
+`reloadServerConfig()` (= `bootstrapConfig()`) ricarica accounts + tag-rules +
+groups dal server. Avviene quando:
 
-1. L'app parte (`init()` → `refreshAll()` → `reloadServerConfig()`)
+1. L'app parte (`init()` → `refreshAll()` → `bootstrapConfig()` → `bootstrapTransactions()`)
 2. L'utente clicca "Ricarica" nel pannello classificazione
 3. L'utente salva modifiche a regole o gruppi
-4. Si entra nella vista Gruppi da un'altra vista (indirettamente via `refreshChart`)
+4. L'utente fa reset seed o crea un tag al volo da drill / AI suggest
 
-Questo garantisce che se il client A salva modifiche, il client B le vede al successivo
-refresh (niente sync push, niente websocket — sono dati "slow-moving").
+Per le **transazioni** invece, `bootstrapTransactions()` è chiamato solo dai
+flussi che alterano il DB delle tx (vedi sezione precedente).
+
+Niente sync push, niente websocket: se il client A modifica regole, il client B
+le vede al click su "Ricarica" (sono dati "slow-moving").
 
 ## Persistenza config client
 
@@ -131,3 +181,10 @@ Al primo run Rust compila tutta la dependency tree (qualche minuto). Reload di
   pura delle regex + descrizioni, ricalcolarli è più rapido che invalidarli.
 - Non chiamare il server con URL assoluti hard-coded: usa sempre `apiUrl(path)` che
   prepone `state.serverUrl`.
+- **Non fare round-trip al server per filtrare/ordinare/aggregare le tx**: `state.allTx`
+  è già in memoria, le funzioni `filterTx` / `computeSeries` / `computeGroupStats`
+  fanno tutto in millisecondi anche con migliaia di tx. Il server era prima il collo
+  di bottiglia su Raspberry Pi armhf — non re-introdurre endpoint di calcolo.
+- Non aggiungere caching delle GET (esisteva un `apiCache` rimosso): l'unica GET
+  pesante è `/api/transactions/all` ed è già "cachata" implicitamente in
+  `state.allTx`. Cachare le altre nasconde mutazioni server-side e basta.

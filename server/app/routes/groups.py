@@ -1,19 +1,9 @@
 from __future__ import annotations
 
-import re
-from typing import Optional
-
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from .. import db
-from ..filters import trading_exclusion_clause
-from ..services.grouping import (
-    compiled_groups,
-    compiled_tag_rules,
-    compute_tags,
-    match_group,
-)
 
 router = APIRouter()
 
@@ -37,10 +27,6 @@ def list_tag_rules() -> list[dict]:
 
 @router.post("/tag-rules")
 def create_tag_rule(rule: TagRuleIn) -> dict:
-    try:
-        re.compile(rule.pattern)
-    except re.error as e:
-        raise HTTPException(status_code=400, detail=f"Regex non valida: {e}")
     with db.tx() as conn:
         cur = conn.execute(
             "INSERT INTO tag_rules (name, pattern, tag, priority) VALUES (?, ?, ?, ?)",
@@ -52,10 +38,6 @@ def create_tag_rule(rule: TagRuleIn) -> dict:
 
 @router.put("/tag-rules/{rule_id}")
 def update_tag_rule(rule_id: int, rule: TagRuleIn) -> dict:
-    try:
-        re.compile(rule.pattern)
-    except re.error as e:
-        raise HTTPException(status_code=400, detail=f"Regex non valida: {e}")
     with db.tx() as conn:
         cur = conn.execute(
             "UPDATE tag_rules SET name=?, pattern=?, tag=?, priority=? WHERE id=?",
@@ -77,12 +59,9 @@ def delete_tag_rule(rule_id: int) -> dict:
 
 @router.post("/tag-rules/bulk")
 def bulk_replace_tag_rules(rules: list[TagRuleIn]) -> dict:
-    """Sostituisce l'intera lista di tag_rules in modo atomico."""
-    for r in rules:
-        try:
-            re.compile(r.pattern)
-        except re.error as e:
-            raise HTTPException(status_code=400, detail=f"Regex non valida in '{r.name}': {e}")
+    """Sostituisce l'intera lista di tag_rules in modo atomico.
+    La validazione delle regex è responsabilità del client (Tauri/JS): il server
+    accetta qualsiasi pattern testuale e si limita allo storage."""
     with db.tx() as conn:
         conn.execute("DELETE FROM tag_rules")
         for r in rules:
@@ -176,7 +155,11 @@ def bulk_replace_groups(groups: list[GroupIn]) -> dict:
 
 @router.get("/tags")
 def list_tags() -> list[str]:
-    """Tag distinti referenziati dalle regole o dai gruppi."""
+    """Tag distinti referenziati dalle regole o dai gruppi.
+
+    Tenuto vivo per evolutivi futuri (es. tag pre-calcolati lato server quando il
+    DB cambia, così il client non li ricalcola ad ogni bootstrap). Il client
+    attuale costruisce comunque la lista dai dati in memoria."""
     rows = db.conn().execute(
         "SELECT tag FROM tag_rules UNION SELECT tag FROM group_tags ORDER BY tag"
     ).fetchall()
@@ -190,117 +173,3 @@ def reset_seed() -> dict:
     """Wipe tag_rules + groups + group_tags e re-inserisce la seed iniziale."""
     db.reset_to_seed()
     return {"ok": True}
-
-
-# ---------- Statistiche per gruppo (bar chart) ----------
-
-def _parse_ids(s: Optional[str]) -> Optional[list[int]]:
-    # None = parametro assente (tutti i conti); "" = lista vuota esplicita (nessuno)
-    if s is None:
-        return None
-    try:
-        return [int(x) for x in s.split(",") if x.strip()]
-    except ValueError:
-        return None
-
-
-@router.get("/group-stats")
-def group_stats(
-    accounts: Optional[str] = Query(None),
-    include_authorized: bool = Query(False),
-    exclude_trading: bool = Query(False),
-    date_from: Optional[str] = Query(None),
-    date_to: Optional[str] = Query(None),
-) -> dict:
-    ids = _parse_ids(accounts)
-    # Lista esplicitamente vuota = nessun conto -> stats vuote ma comunque con lista gruppi
-    if ids is not None and len(ids) == 0:
-        groups = compiled_groups()
-        return {
-            "groups": [
-                {"id": g["id"], "name": g["name"], "kind": g["kind"], "tags": sorted(gtags),
-                 "count": 0, "total": 0.0,
-                 "income_total": 0.0, "expense_abs_total": 0.0,
-                 "income_count": 0, "expense_count": 0}
-                for g, gtags in groups
-            ],
-            "uncategorized": {"count": 0, "total": 0.0},
-            "uncategorized_income": {"count": 0, "total": 0.0},
-            "uncategorized_expense": {"count": 0, "total": 0.0},
-        }
-
-    where = ["1=1"]
-    args: list = []
-    if ids:
-        where.append(f"account_id IN ({','.join('?' for _ in ids)})")
-        args.extend(ids)
-    if not include_authorized:
-        where.append("(status IS NULL OR status != 'Autorizzato')")
-    if exclude_trading:
-        clause, clause_args = trading_exclusion_clause(
-            desc_col="description", full_col="full_description"
-        )
-        where.append(clause)
-        args.extend(clause_args)
-    if date_from:
-        where.append("value_date >= ?")
-        args.append(date_from)
-    if date_to:
-        where.append("value_date <= ?")
-        args.append(date_to)
-
-    tx_rows = db.conn().execute(
-        "SELECT amount, description, full_description, enriched_description "
-        "FROM transactions WHERE " + " AND ".join(where),
-        args,
-    ).fetchall()
-
-    rules = compiled_tag_rules()
-    groups = compiled_groups()
-    stats: dict[int, dict] = {
-        g["id"]: {
-            "id": g["id"], "name": g["name"], "kind": g["kind"], "tags": sorted(gtags),
-            "count": 0, "total": 0.0,
-            "income_total": 0.0, "expense_abs_total": 0.0,
-            "income_count": 0, "expense_count": 0,
-        }
-        for g, gtags in groups
-    }
-    uncategorized_income = {"count": 0, "total": 0.0}
-    uncategorized_expense = {"count": 0, "total": 0.0}
-
-    for t in tx_rows:
-        amount = float(t["amount"])
-        tags = compute_tags(t["description"], t["full_description"], rules, t["enriched_description"])
-        gid = match_group(amount, tags, groups)
-        if gid is None:
-            bucket = uncategorized_income if amount >= 0 else uncategorized_expense
-            bucket["count"] += 1
-            bucket["total"] += amount
-        else:
-            s = stats[gid]
-            s["count"] += 1
-            s["total"] += amount
-            if amount >= 0:
-                s["income_total"] += amount
-                s["income_count"] += 1
-            else:
-                s["expense_abs_total"] += -amount
-                s["expense_count"] += 1
-
-    for s in stats.values():
-        s["total"] = round(s["total"], 2)
-        s["income_total"] = round(s["income_total"], 2)
-        s["expense_abs_total"] = round(s["expense_abs_total"], 2)
-    uncategorized_income["total"] = round(uncategorized_income["total"], 2)
-    uncategorized_expense["total"] = round(uncategorized_expense["total"], 2)
-
-    total_count = uncategorized_income["count"] + uncategorized_expense["count"]
-    total_sum = round(uncategorized_income["total"] + uncategorized_expense["total"], 2)
-
-    return {
-        "groups": list(stats.values()),
-        "uncategorized": {"count": total_count, "total": total_sum},
-        "uncategorized_income": uncategorized_income,
-        "uncategorized_expense": uncategorized_expense,
-    }
