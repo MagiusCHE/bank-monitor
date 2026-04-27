@@ -37,6 +37,8 @@ const state = {
   openaiApiKey: "",
   claudeModel: "sonnet",
   openaiModel: "gpt-4o",
+  // Vista Gruppi: una sola barra col netto invece di stacked entrate/uscite
+  barNetOnly: false,
 };
 
 // Descrizione da mostrare per una transazione: priorità enriched (da PayPal match)
@@ -145,6 +147,7 @@ async function loadConfig() {
         state.openaiApiKey = cfg.openai_api_key || "";
         state.claudeModel = cfg.claude_model || "sonnet";
         state.openaiModel = cfg.openai_model || "gpt-4o";
+        state.barNetOnly = !!cfg.bar_net_only;
         applyTheme(theme);
         return;
       }
@@ -166,6 +169,7 @@ async function saveConfig() {
         openaiApiKey: state.openaiApiKey || "",
         claudeModel: state.claudeModel || "sonnet",
         openaiModel: state.openaiModel || "gpt-4o",
+        barNetOnly: !!state.barNetOnly,
       });
       return;
     } catch (e) { console.warn("set_config:", e); }
@@ -891,10 +895,15 @@ function refreshChart() {
   if (!state.serverUrl) { showChart(false); return; }
   if (state.accounts.length === 0) { showChart(false); return; }
 
+  // Status bar centralizzata: stessa info per tutte le viste (P&L conto + saldo).
+  renderAccountStatus();
   refreshTradingPnl();
 
+  const isGroups = state.view === "groups";
+  $("#bar-net-only-label").classList.toggle("hidden", !isGroups);
+
   // Vista "groups" mostra il pannello CRUD gruppi + bar chart dei gruppi
-  if (state.view === "groups") {
+  if (isGroups) {
     $("#groups-panel").classList.remove("hidden");
     renderBarChart();
     return;
@@ -902,6 +911,52 @@ function refreshChart() {
   $("#groups-panel").classList.add("hidden");
   closeDrill();
   renderLineChart();
+}
+
+// Calcola e disegna la status bar (P&L del conto + saldo finale + nota trading
+// come icona info). Sempre la stessa indipendentemente dalla view. Il P&L è la
+// differenza tra il saldo all'ultima data del range e il saldo alla prima data
+// della serie cumulativa filtrata, applicando il toggle excludeTrading.
+function renderAccountStatus() {
+  const el = $("#status-msg");
+  if (!el) return;
+
+  if (state.selectedIds.size === 0) {
+    el.className = "status-msg";
+    el.textContent = "Nessun conto selezionato";
+    return;
+  }
+
+  // Costruisco la serie cumulativa con i filtri correnti per estrarre il primo
+  // e l'ultimo punto dentro il range. computeSeries gestisce internamente il
+  // filtro di data: qui passiamo le tx senza filtro temporale.
+  const filteredNoDates = filterTx(state.allTx, { dateFrom: "", dateTo: "" });
+  const series = computeSeries(filteredNoDates, "cumulative", state.dateFrom, state.dateTo);
+  const points = series.points || [];
+
+  if (points.length === 0) {
+    el.className = "status-msg";
+    el.textContent = "Nessun dato nel periodo selezionato";
+    return;
+  }
+
+  const first = points[0];
+  const last = points[points.length - 1];
+  const pnl = last.balance - first.balance;
+  const pnlCls = pnl >= 0 ? "value-positive" : "value-negative";
+  const pnlSign = pnl >= 0 ? "+" : "";
+  const balanceCls = last.balance >= 0 ? "value-positive" : "value-negative";
+
+  const infoIcon = state.excludeTrading
+    ? ' <span class="info-icon" title="Escluse compravendite titoli, dividendi, cedole, rimborsi titoli">i</span>'
+    : "";
+
+  el.className = "status-msg";
+  el.innerHTML =
+    `P&L conto: <strong class="${pnlCls}">${pnlSign}${fmtEur(pnl)}</strong>` +
+    ` &nbsp;·&nbsp; Saldo al ${fmtItDate(last.date)}: ` +
+    `<strong class="${balanceCls}">${fmtEur(last.balance)}</strong>` +
+    infoIcon;
 }
 
 // Parse una riga "Compravendita Titoli BTP-1OT54 4,3% Qta/Val.nom. 10000,000000"
@@ -1019,11 +1074,20 @@ function refreshTradingPnl() {
   const pnl = computeTradingPnl(rows);
   const cls = pnl.realized >= 0 ? "value-positive" : "value-negative";
   const sign = pnl.realized >= 0 ? "+" : "";
-  el.className = `trading-pnl ${cls}`;
-  const investedNote = pnl.open_invested > 0
-    ? ` <span class="hint">· ${fmtEur(pnl.open_invested)} ancora investito</span>`
-    : "";
-  el.innerHTML = `Trading P&amp;L: <strong>${sign}${fmtEur(pnl.realized)}</strong> <span class="hint">(${pnl.count} mov.)</span>${investedNote}`;
+  el.classList.remove("hidden");
+  // Solo il valore è colorato; "Trading P&L:" e i dettagli restano grigi.
+  const valueEl = el.querySelector(".trading-pnl-value");
+  const detailEl = el.querySelector(".trading-pnl-detail");
+  if (valueEl) {
+    valueEl.className = `trading-pnl-value ${cls}`;
+    valueEl.textContent = `${sign}${fmtEur(pnl.realized)}`;
+  }
+  if (detailEl) {
+    const investedNote = pnl.open_invested > 0
+      ? ` · ${fmtEur(pnl.open_invested)} ancora investito`
+      : "";
+    detailEl.textContent = `(${pnl.count} mov.)${investedNote}`;
+  }
   el.title = `Realizzato: ${fmtEur(pnl.realized)}\n` +
              `  • Compra/vendi chiuse: ${fmtEur(pnl.realized_core)}\n` +
              `  • Cedole/dividendi: ${fmtEur(pnl.coupons)}\n` +
@@ -1127,32 +1191,6 @@ function renderLineChart() {
     },
   });
 
-  let lastDate = null;
-  let lastBalance = null;
-  if (data.mode === "cumulative") {
-    const last = data.points[data.points.length - 1];
-    if (last) { lastDate = last.date; lastBalance = last.balance; }
-  } else {
-    // Somma gli ultimi saldi di ogni conto visibile; data = max tra le ultime di ogni conto
-    let total = 0;
-    let count = 0;
-    for (const a of data.accounts) {
-      const p = a.points[a.points.length - 1];
-      if (!p) continue;
-      total += Number(p.balance);
-      count += 1;
-      if (!lastDate || p.date > lastDate) lastDate = p.date;
-    }
-    if (count > 0) lastBalance = total;
-  }
-  if (lastDate != null && lastBalance != null) {
-    const note = state.excludeTrading ? " — escluse compravendite titoli" : "";
-    setStatus(`Saldo al ${lastDate}: ${fmtEur(lastBalance)}${note}`, "ok");
-  } else if (state.selectedIds.size === 0) {
-    setStatus("Nessun conto selezionato", "warn");
-  } else {
-    setStatus("Nessun dato nel periodo selezionato", "warn");
-  }
 }
 
 function renderBarChart() {
@@ -1195,18 +1233,36 @@ function renderBarChart() {
                      income_count: 0, expense_count: exp.count, tags: [] });
   }
 
+  // Modalità "solo netto": una barra per gruppo col valore meta.total.
+  // Verde se ≥ 0, rosso se < 0. Niente stack.
+  const NET_GREEN = "rgba(22,163,74,0.75)";
+  const NET_RED = "rgba(220,38,38,0.75)";
+  let datasets;
+  let stackedAxes;
+  if (state.barNetOnly) {
+    const netData = groupMeta.map(m => m.total);
+    const netColors = groupMeta.map(m => (m.total >= 0 ? NET_GREEN : NET_RED));
+    datasets = [{
+      label: "Netto",
+      data: netData,
+      backgroundColor: netColors,
+      borderWidth: 0,
+    }];
+    stackedAxes = false;
+  } else {
+    // Due dataset stacked: uscite (rosso) sotto, entrate (verde) sopra.
+    datasets = [
+      { label: "Uscite",  data: expenseData, backgroundColor: NET_RED,   borderWidth: 0, stack: "g" },
+      { label: "Entrate", data: incomeData,  backgroundColor: NET_GREEN, borderWidth: 0, stack: "g" },
+    ];
+    stackedAxes = true;
+  }
+
   showChart(true);
   destroyChart();
   chart = new Chart($("#main-chart"), {
     type: "bar",
-    data: {
-      labels,
-      datasets: [
-        // Segmento rosso (uscite) in basso, verde (entrate) sopra
-        { label: "Uscite",  data: expenseData, backgroundColor: "rgba(220,38,38,0.75)",  borderWidth: 0, stack: "g" },
-        { label: "Entrate", data: incomeData,  backgroundColor: "rgba(22,163,74,0.75)", borderWidth: 0, stack: "g" },
-      ],
-    },
+    data: { labels, datasets },
     options: {
       responsive: true,
       maintainAspectRatio: false,
@@ -1223,11 +1279,11 @@ function renderBarChart() {
         openDrill(meta);
       },
       scales: {
-        x: { stacked: true, grid: { color: gridColor() } },
-        y: { stacked: true, grid: { color: gridColor() }, ticks: { callback: (v) => fmtEur(v) } },
+        x: { stacked: stackedAxes, grid: { color: gridColor() } },
+        y: { stacked: stackedAxes, grid: { color: gridColor() }, ticks: { callback: (v) => fmtEur(v) } },
       },
       plugins: {
-        legend: { display: true, position: "bottom" },
+        legend: { display: !state.barNetOnly, position: "bottom" },
         tooltip: {
           callbacks: {
             title: (items) => items && items[0] ? items[0].label : "",
@@ -1244,19 +1300,14 @@ function renderBarChart() {
               return lines;
             },
           },
-          filter: (item) => item.raw > 0, // nel tooltip mostra solo il dataset col valore != 0
+          // In modalità stacked nascondiamo le righe a 0; in modalità netto
+          // serve mostrare anche i valori negativi (item.raw può essere < 0).
+          filter: (item) => state.barNetOnly ? item.raw !== 0 : item.raw > 0,
         },
       },
     },
   });
   $("#main-chart").style.cursor = "pointer";
-  if (state.selectedIds.size === 0) {
-    setStatus("Nessun conto selezionato", "warn");
-  } else if (visible.length === 0 && data.uncategorized.count === 0) {
-    setStatus("Nessun dato nel periodo selezionato", "warn");
-  } else {
-    setStatus(`${visible.length} gruppi attivi${data.uncategorized.count ? `, ${data.uncategorized.count} non classificati` : ""}`, "ok");
-  }
 }
 
 function destroyChart() {
@@ -1940,6 +1991,12 @@ async function init() {
   $("#include-authorized").onchange = (e) => { state.includeAuthorized = e.target.checked; refreshChart(); };
   $("#exclude-trading").onchange = (e) => { state.excludeTrading = e.target.checked; refreshChart(); };
   $("#exclude-trading").checked = state.excludeTrading;
+  $("#bar-net-only").checked = !!state.barNetOnly;
+  $("#bar-net-only").onchange = (e) => {
+    state.barNetOnly = e.target.checked;
+    saveConfig();
+    refreshChart();
+  };
   $("#date-from").onchange = (e) => { state.dateFrom = e.target.value; refreshChart(); };
   $("#date-to").onchange = (e) => { state.dateTo = e.target.value; refreshChart(); };
   $("#drill-close").onclick = closeDrill;

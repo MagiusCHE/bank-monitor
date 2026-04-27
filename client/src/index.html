@@ -102,6 +102,9 @@
         <label title="Esclude compravendite titoli, dividendi, cedole — le vedi nella vista Gruppi">
           <input type="checkbox" id="exclude-trading" checked> Escludi trading
         </label>
+        <label id="bar-net-only-label" class="hidden" title="Mostra una sola barra per gruppo col valore netto (entrate − uscite). Verde se ≥ 0, rosso se &lt; 0.">
+          <input type="checkbox" id="bar-net-only"> Mostra solo netto per gruppo
+        </label>
         <span class="flex-spacer"></span>
         <label>Da <input type="date" id="date-from"></label>
         <label>A <input type="date" id="date-to"></label>
@@ -116,7 +119,7 @@
     <!-- Stato / messaggi -->
     <div class="status-bar">
       <div id="status-msg" class="status-msg"></div>
-      <span id="trading-pnl" class="trading-pnl hidden" title="Profit & Loss complessivo delle operazioni di trading (compravendita titoli, dividendi, cedole, rimborsi titoli) nel periodo e conti selezionati"></span>
+      <span id="trading-pnl" class="trading-pnl hidden" title="Profit & Loss complessivo delle operazioni di trading (compravendita titoli, dividendi, cedole, rimborsi titoli) nel periodo e conti selezionati">Trading P&amp;L: <strong class="trading-pnl-value"></strong> <span class="trading-pnl-detail hint"></span></span>
     </div>
 
     <!-- Contenitore grafico -->

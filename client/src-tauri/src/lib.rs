@@ -25,6 +25,10 @@ struct Config {
     claude_model: String,
     #[serde(default = "default_openai_model")]
     openai_model: String,
+
+    // View preferences (persistite tra sessioni)
+    #[serde(default)]
+    bar_net_only: bool,
 }
 
 fn default_theme() -> String {
@@ -80,6 +84,7 @@ fn set_config(
     openai_api_key: Option<String>,
     claude_model: Option<String>,
     openai_model: Option<String>,
+    bar_net_only: Option<bool>,
 ) -> Result<(), String> {
     let existing = read_config_raw();
     let cfg = Config {
@@ -92,6 +97,7 @@ fn set_config(
         openai_api_key: openai_api_key.unwrap_or(existing.openai_api_key),
         claude_model: claude_model.unwrap_or(existing.claude_model),
         openai_model: openai_model.unwrap_or(existing.openai_model),
+        bar_net_only: bar_net_only.unwrap_or(existing.bar_net_only),
     };
     let data = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
     fs::write(config_path(), data).map_err(|e| e.to_string())
