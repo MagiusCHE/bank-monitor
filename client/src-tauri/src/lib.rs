@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 struct Config {
@@ -16,7 +17,7 @@ struct Config {
 
     // AI settings
     #[serde(default = "default_ai_mode")]
-    ai_mode: String, // "claude-cli" | "claude-api" | "codex-cli" | "openai-api"
+    ai_mode: String, // "claude-cli" | "claude-api" | "codex-cli" | "opencode-cli" | "openai-api"
     #[serde(default)]
     anthropic_api_key: String,
     #[serde(default)]
@@ -58,6 +59,70 @@ fn config_dir() -> PathBuf {
 fn config_path() -> PathBuf {
     config_dir().join("config.json")
 }
+
+fn cache_dir() -> PathBuf {
+    let dir = config_dir().join("cache");
+    fs::create_dir_all(&dir).ok();
+    dir
+}
+
+#[derive(Serialize, Deserialize)]
+struct CacheEntry {
+    fetched_at: u64,
+    data: String,
+}
+
+fn cache_get(key: &str, ttl_secs: u64) -> Option<String> {
+    let path = cache_dir().join(format!("{}.json", key));
+    let data = fs::read_to_string(&path).ok()?;
+    let entry: CacheEntry = serde_json::from_str(&data).ok()?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if now - entry.fetched_at < ttl_secs {
+        Some(entry.data)
+    } else {
+        None
+    }
+}
+
+fn cache_get_stale(key: &str) -> Option<String> {
+    let path = cache_dir().join(format!("{}.json", key));
+    let data = fs::read_to_string(&path).ok()?;
+    let entry: CacheEntry = serde_json::from_str(&data).ok()?;
+    Some(entry.data)
+}
+
+fn cache_set(key: &str, data: &str) {
+    let path = cache_dir().join(format!("{}.json", key));
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let entry = CacheEntry {
+        fetched_at: now,
+        data: data.to_string(),
+    };
+    if let Ok(json) = serde_json::to_string(&entry) {
+        fs::write(path, json).ok();
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiModel {
+    pub id: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AiModelsPayload {
+    pub models: Vec<AiModel>,
+    pub stale: bool,
+    pub error: Option<String>,
+}
+
+const AI_MODELS_CACHE_TTL_SECS: u64 = 86400; // 1 giorno
 
 fn read_config_raw() -> Config {
     let path = config_path();
@@ -116,11 +181,15 @@ fn save_window_size(width: f64, height: f64) -> Result<(), String> {
 
 async fn call_claude_cli(system_prompt: &str, user_prompt: &str, model: &str) -> Result<String, String> {
     let full_prompt = format!("{}\n\n{}", system_prompt, user_prompt);
-    let model = model.to_string();
+    let model = model.trim().to_string();
+    let use_model = !model.is_empty() && model != "default";
     let result = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("claude")
-            .args(["-p", &full_prompt, "--model", &model, "--output-format", "text"])
-            .output()
+        let mut cmd = std::process::Command::new("claude");
+        cmd.args(["-p", &full_prompt, "--output-format", "text"]);
+        if use_model {
+            cmd.args(["--model", &model]);
+        }
+        cmd.output()
     })
     .await
     .map_err(|e| format!("task join: {}", e))?;
@@ -173,11 +242,15 @@ async fn call_claude_api(
 
 async fn call_codex_cli(system_prompt: &str, user_prompt: &str, model: &str) -> Result<String, String> {
     let full_prompt = format!("{}\n\n{}", system_prompt, user_prompt);
-    let model = model.to_string();
+    let model = model.trim().to_string();
+    let use_model = !model.is_empty() && model != "default";
     let result = tokio::task::spawn_blocking(move || {
-        std::process::Command::new("codex")
-            .args(["exec", "--skip-git-repo-check", "-m", &model, &full_prompt])
-            .output()
+        let mut cmd = std::process::Command::new("codex");
+        cmd.args(["exec", "--skip-git-repo-check"]);
+        if use_model {
+            cmd.args(["-m", &model]);
+        }
+        cmd.arg(&full_prompt).output()
     })
     .await
     .map_err(|e| format!("task join: {}", e))?;
@@ -185,6 +258,28 @@ async fn call_codex_cli(system_prompt: &str, user_prompt: &str, model: &str) -> 
     let output = result.map_err(|e| format!("spawn codex: {}", e))?;
     if !output.status.success() {
         return Err(format!("codex CLI error: {}", String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+async fn call_opencode_cli(system_prompt: &str, user_prompt: &str, model: &str) -> Result<String, String> {
+    let full_prompt = format!("{}\n\n{}", system_prompt, user_prompt);
+    let model = model.trim().to_string();
+    let use_default = model.is_empty() || model == "default";
+    let result = tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new("opencode");
+        cmd.arg("run");
+        if !use_default {
+            cmd.args(["-m", &model]);
+        }
+        cmd.arg(&full_prompt).output()
+    })
+    .await
+    .map_err(|e| format!("task join: {}", e))?;
+
+    let output = result.map_err(|e| format!("spawn opencode: {}", e))?;
+    if !output.status.success() {
+        return Err(format!("opencode CLI error: {}", String::from_utf8_lossy(&output.stderr)));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
@@ -231,6 +326,7 @@ async fn call_ai(cfg: &Config, system_prompt: &str, user_prompt: &str) -> Result
         "claude-cli" | "cli" => call_claude_cli(system_prompt, user_prompt, &cfg.claude_model).await,
         "claude-api" | "api" => call_claude_api(&client, system_prompt, user_prompt, &cfg.anthropic_api_key, &cfg.claude_model).await,
         "codex-cli" => call_codex_cli(system_prompt, user_prompt, &cfg.openai_model).await,
+        "opencode-cli" => call_opencode_cli(system_prompt, user_prompt, &cfg.claude_model).await,
         "openai-api" => call_openai_api(&client, system_prompt, user_prompt, &cfg.openai_api_key, &cfg.openai_model).await,
         other => Err(format!("modalità AI sconosciuta: {}", other)),
     }
@@ -297,6 +393,337 @@ Restituisci entrambe le liste vuote solo se la descrizione è davvero generica o
     }
 }
 
+// -------- AI model list management --------
+
+fn ai_models_cache_key(provider: &str) -> Result<String, String> {
+    match provider {
+        "anthropic" | "openai" | "claude-cli" | "codex-cli" | "opencode-cli" => {
+            Ok(format!("ai_models_{}", provider))
+        }
+        _ => Err(format!("Provider AI non supportato: {}", provider)),
+    }
+}
+
+fn cached_ai_models(provider: &str, stale: bool) -> Result<Vec<AiModel>, String> {
+    let key = ai_models_cache_key(provider)?;
+    let data = if stale {
+        cache_get_stale(&key)
+    } else {
+        cache_get(&key, AI_MODELS_CACHE_TTL_SECS)
+    };
+    match data {
+        Some(json) => serde_json::from_str::<Vec<AiModel>>(&json).map_err(|e| e.to_string()),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn save_ai_models_cache(provider: &str, models: &[AiModel]) {
+    if let Ok(key) = ai_models_cache_key(provider) {
+        if let Ok(json) = serde_json::to_string(models) {
+            cache_set(&key, &json);
+        }
+    }
+}
+
+fn cli_ai_models(provider: &str) -> Option<Vec<AiModel>> {
+    let models = match provider {
+        "claude-cli" => vec![
+            ("opus", "Opus (alias CLI)"),
+            ("sonnet", "Sonnet (alias CLI)"),
+            ("haiku", "Haiku (alias CLI)"),
+            ("claude-opus-4-5", "Claude Opus 4.5"),
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
+            ("claude-haiku-4-5", "Claude Haiku 4.5"),
+        ],
+        "codex-cli" => vec![
+            ("gpt-5.5", "GPT-5.5"),
+            ("gpt-5.4", "GPT-5.4"),
+            ("gpt-5.3", "GPT-5.3"),
+            ("gpt-5.2", "GPT-5.2"),
+            ("gpt-5.1", "GPT-5.1"),
+            ("gpt-5", "GPT-5"),
+            ("gpt-5-codex", "GPT-5 Codex"),
+            ("o3", "o3"),
+            ("o4-mini", "o4-mini"),
+        ],
+        "opencode-cli" => vec![
+            ("claude-opus-4-5", "Claude Opus 4.5"),
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            ("claude-sonnet-4-5", "Claude Sonnet 4.5"),
+            ("claude-haiku-4-5", "Claude Haiku 4.5"),
+            ("gpt-5.5", "GPT-5.5"),
+            ("gpt-5.4", "GPT-5.4"),
+            ("gpt-5.3", "GPT-5.3"),
+            ("gpt-5.2", "GPT-5.2"),
+            ("gpt-5.1", "GPT-5.1"),
+            ("gpt-5", "GPT-5"),
+            ("o3", "o3"),
+            ("o4-mini", "o4-mini"),
+            ("deepseek-v4-pro", "DeepSeek V4 Pro"),
+        ],
+        _ => return None,
+    };
+
+    Some(
+        models
+            .into_iter()
+            .map(|(id, display_name)| AiModel {
+                id: id.to_string(),
+                display_name: display_name.to_string(),
+            })
+            .collect(),
+    )
+}
+
+async fn fetch_anthropic_models(
+    client: &reqwest::Client,
+    api_key: &str,
+) -> Result<Vec<AiModel>, String> {
+    let mut models = Vec::new();
+    let mut after_id: Option<String> = None;
+
+    loop {
+        let mut query = vec![("limit", "1000".to_string())];
+        if let Some(ref cursor) = after_id {
+            query.push(("after_id", cursor.clone()));
+        }
+
+        let response = client
+            .get("https://api.anthropic.com/v1/models")
+            .query(&query)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let status = response.status();
+        let text = response.text().await.map_err(|e| e.to_string())?;
+        if !status.is_success() {
+            return Err(format!("Anthropic ha risposto {}: {}", status, &text[..text.len().min(240)]));
+        }
+
+        #[derive(Deserialize)]
+        struct AnthropicModel {
+            id: String,
+            display_name: Option<String>,
+        }
+        #[derive(Deserialize)]
+        struct AnthropicModelsResponse {
+            data: Vec<AnthropicModel>,
+            has_more: bool,
+            last_id: Option<String>,
+        }
+
+        let parsed = serde_json::from_str::<AnthropicModelsResponse>(&text)
+            .map_err(|e| format!("Risposta Anthropic non valida: {}", e))?;
+        models.extend(parsed.data.into_iter().map(|m| AiModel {
+            display_name: m.display_name.unwrap_or_else(|| m.id.clone()),
+            id: m.id,
+        }));
+
+        if !parsed.has_more {
+            break;
+        }
+        after_id = parsed.last_id;
+        if after_id.is_none() {
+            break;
+        }
+    }
+
+    Ok(models)
+}
+
+fn is_openai_usable_model(id: &str) -> bool {
+    let lower = id.to_ascii_lowercase();
+    let excluded = [
+        "audio", "computer-use", "dall-e", "deep-research",
+        "embedding", "image", "moderation", "realtime",
+        "search", "sora", "transcribe", "tts", "whisper",
+    ];
+    if excluded.iter().any(|needle| lower.contains(needle)) {
+        return false;
+    }
+    lower.starts_with("gpt-")
+        || lower.starts_with("chatgpt-")
+        || lower.starts_with("o")
+        || lower.starts_with("ft:gpt-")
+        || lower.starts_with("ft:o")
+}
+
+async fn fetch_openai_models(
+    client: &reqwest::Client,
+    api_key: &str,
+) -> Result<Vec<AiModel>, String> {
+    let response = client
+        .get("https://api.openai.com/v1/models")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = response.status();
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("OpenAI ha risposto {}: {}", status, &text[..text.len().min(240)]));
+    }
+
+    #[derive(Deserialize)]
+    struct OpenAiModel {
+        id: String,
+        created: Option<i64>,
+    }
+    #[derive(Deserialize)]
+    struct OpenAiModelsResponse {
+        data: Vec<OpenAiModel>,
+    }
+
+    let parsed = serde_json::from_str::<OpenAiModelsResponse>(&text)
+        .map_err(|e| format!("Risposta OpenAI non valida: {}", e))?;
+    let mut models: Vec<(AiModel, i64)> = parsed
+        .data
+        .into_iter()
+        .filter(|m| is_openai_usable_model(&m.id))
+        .map(|m| {
+            let id = m.id;
+            (AiModel { display_name: id.clone(), id }, m.created.unwrap_or_default())
+        })
+        .collect();
+
+    models.sort_by(|(a, ca), (b, cb)| cb.cmp(ca).then_with(|| a.id.cmp(&b.id)));
+
+    Ok(models.into_iter().map(|(m, _)| m).collect())
+}
+
+async fn fetch_opencode_models() -> Result<Vec<AiModel>, String> {
+    let result = tokio::task::spawn_blocking(|| {
+        std::process::Command::new("opencode")
+            .args(["models"])
+            .output()
+    })
+    .await;
+
+    match result {
+        Ok(Ok(output)) => {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                let mut models: Vec<AiModel> = vec![
+                    AiModel {
+                        id: "default".to_string(),
+                        display_name: "Default (configurato in opencode)".to_string(),
+                    },
+                ];
+                for line in text.lines() {
+                    let id = line.trim().to_string();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    models.push(AiModel {
+                        display_name: id.clone(),
+                        id,
+                    });
+                }
+                Ok(models)
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                Err(format!("opencode models error: {}", stderr))
+            }
+        }
+        Ok(Err(e)) => Err(format!("Failed to execute opencode models: {}", e)),
+        Err(e) => Err(format!("Task join error: {}", e)),
+    }
+}
+
+#[tauri::command]
+fn get_cached_ai_models(provider: String) -> Result<Vec<AiModel>, String> {
+    cached_ai_models(&provider, false)
+}
+
+#[tauri::command]
+async fn refresh_ai_models(provider: String, api_key: String) -> Result<AiModelsPayload, String> {
+    if let Some(models) = cli_ai_models(&provider) {
+        save_ai_models_cache(&provider, &models);
+        return Ok(AiModelsPayload {
+            models,
+            stale: false,
+            error: None,
+        });
+    }
+
+    if provider == "opencode-cli" {
+        match fetch_opencode_models().await {
+            Ok(models) => {
+                save_ai_models_cache(&provider, &models);
+                return Ok(AiModelsPayload {
+                    models,
+                    stale: false,
+                    error: None,
+                });
+            }
+            Err(err) => {
+                let stale = cached_ai_models(&provider, true).unwrap_or_else(|_| {
+                    vec![AiModel {
+                        id: "default".to_string(),
+                        display_name: "Default (configurato in opencode)".to_string(),
+                    }]
+                });
+                if stale.is_empty() {
+                    return Err(err);
+                }
+                return Ok(AiModelsPayload {
+                    models: stale,
+                    stale: true,
+                    error: Some(err),
+                });
+            }
+        }
+    }
+
+    if api_key.trim().is_empty() {
+        return Err("API key mancante: inseriscila prima di aggiornare i modelli.".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let result = match provider.as_str() {
+        "anthropic" => fetch_anthropic_models(&client, api_key.trim()).await,
+        "openai" => fetch_openai_models(&client, api_key.trim()).await,
+        _ => Err(format!("Provider AI non supportato: {}", provider)),
+    };
+
+    match result {
+        Ok(models) => {
+            if models.is_empty() {
+                return Err("Il provider non ha restituito modelli utilizzabili.".to_string());
+            }
+            save_ai_models_cache(&provider, &models);
+            Ok(AiModelsPayload {
+                models,
+                stale: false,
+                error: None,
+            })
+        }
+        Err(err) => {
+            let stale = cached_ai_models(&provider, true).unwrap_or_default();
+            if stale.is_empty() {
+                Err(err)
+            } else {
+                Ok(AiModelsPayload {
+                    models: stale,
+                    stale: true,
+                    error: Some(err),
+                })
+            }
+        }
+    }
+}
+
 // Delta tra inner_size() letto e inner_size() impostato nel builder.
 // Su Wayland con CSD, inner_size() include le decorazioni.
 static CSD_DELTA: Mutex<Option<(f64, f64)>> = Mutex::new(None);
@@ -317,7 +744,7 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_http::init())
-        .invoke_handler(tauri::generate_handler![get_config, set_config, save_window_size, suggest_tags])
+        .invoke_handler(tauri::generate_handler![get_config, set_config, save_window_size, suggest_tags, get_cached_ai_models, refresh_ai_models])
         .setup(move |app| {
             #[cfg(not(target_os = "android"))]
             {

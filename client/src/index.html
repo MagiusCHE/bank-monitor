@@ -53,20 +53,25 @@
           <option value="claude-cli">Claude CLI locale</option>
           <option value="claude-api">Claude API (HTTP)</option>
           <option value="codex-cli">Codex CLI locale</option>
+          <option value="opencode-cli">OpenCode CLI locale</option>
           <option value="openai-api">OpenAI API (HTTP)</option>
         </select>
       </div>
       <div class="setting-row ai-field" id="ai-claude-model-row">
         <label for="ai-claude-model">Modello Claude</label>
-        <select id="ai-claude-model">
-          <option value="sonnet">Sonnet (rapido)</option>
-          <option value="opus">Opus (più accurato)</option>
-          <option value="haiku">Haiku (molto rapido)</option>
-        </select>
+        <div class="model-select-group">
+          <select id="ai-claude-model"></select>
+          <button id="refresh-claude-models" class="btn-icon" type="button" title="Aggiorna modelli Claude">↻</button>
+        </div>
+        <div id="claude-model-status" class="model-status hint"></div>
       </div>
       <div class="setting-row ai-field" id="ai-openai-model-row">
         <label for="ai-openai-model">Modello OpenAI</label>
-        <input type="text" id="ai-openai-model" placeholder="gpt-4o" spellcheck="false">
+        <div class="model-select-group">
+          <select id="ai-openai-model"></select>
+          <button id="refresh-openai-models" class="btn-icon" type="button" title="Aggiorna modelli OpenAI">↻</button>
+        </div>
+        <div id="openai-model-status" class="model-status hint"></div>
       </div>
       <div class="setting-row ai-field" id="ai-anthropic-key-row">
         <label for="ai-anthropic-key">API key Anthropic</label>

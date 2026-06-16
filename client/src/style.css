@@ -253,6 +253,53 @@ input[type=text]:focus, input[type=date]:focus, select:focus {
   min-width: 200px;
 }
 
+.model-select-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 200px;
+}
+
+.model-select-group select {
+  flex: 1;
+}
+
+.btn-icon {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-secondary);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.btn-icon:hover {
+  border-color: var(--accent);
+  background: var(--bg);
+}
+
+.btn-icon:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.model-status {
+  min-height: 18px;
+  line-height: 1.4;
+}
+
+.model-status.error {
+  color: var(--negative, #dc2626);
+}
+
 /* Toolbar a due colonne: sinistra (filtri + conti) e destra (date + shortcut).
    Le colonne non vanno mai a capo: solo le righe interne wrappano. */
 #toolbar {

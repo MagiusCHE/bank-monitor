@@ -884,18 +884,17 @@ function openSettings() {
   $("#server-url-input").value = state.serverUrl;
   $("#test-connection-status").textContent = "";
   $("#ai-mode-select").value = state.aiMode || "claude-cli";
-  $("#ai-claude-model").value = state.claudeModel || "sonnet";
-  $("#ai-openai-model").value = state.openaiModel || "gpt-4o";
   $("#ai-anthropic-key").value = state.anthropicApiKey || "";
   $("#ai-openai-key").value = state.openaiApiKey || "";
   updateAiFieldsVisibility();
+  handleAiModeChange();
   $("#settings-panel").classList.remove("hidden");
   renderSettingsAccounts();
 }
 
 function updateAiFieldsVisibility() {
   const mode = $("#ai-mode-select").value;
-  $("#ai-claude-model-row").classList.toggle("hidden", mode !== "claude-cli" && mode !== "claude-api");
+  $("#ai-claude-model-row").classList.toggle("hidden", mode !== "claude-cli" && mode !== "claude-api" && mode !== "opencode-cli");
   $("#ai-openai-model-row").classList.toggle("hidden", mode !== "codex-cli" && mode !== "openai-api");
   $("#ai-anthropic-key-row").classList.toggle("hidden", mode !== "claude-api");
   $("#ai-openai-key-row").classList.toggle("hidden", mode !== "openai-api");
@@ -951,6 +950,158 @@ function toggleSettings() {
   else closeSettings();
 }
 
+// -------- AI model dropdown management --------
+const MODEL_PROVIDERS = {
+  anthropic: {
+    selectId: "ai-claude-model",
+    statusId: "claude-model-status",
+    buttonId: "refresh-claude-models",
+    keyInputId: "ai-anthropic-key",
+    configKey: "claudeModel",
+  },
+  openai: {
+    selectId: "ai-openai-model",
+    statusId: "openai-model-status",
+    buttonId: "refresh-openai-models",
+    keyInputId: "ai-openai-key",
+    configKey: "openaiModel",
+  },
+};
+
+function getCurrentAiMode() {
+  return ($("#ai-mode-select")?.value || state.aiMode || "claude-cli").trim();
+}
+
+function getActiveModelSource(provider) {
+  const mode = getCurrentAiMode();
+  if (provider === "anthropic" && mode === "claude-cli") return "claude-cli";
+  if (provider === "anthropic" && mode === "opencode-cli") return "opencode-cli";
+  if (provider === "openai" && mode === "codex-cli") return "codex-cli";
+  return provider;
+}
+
+function sourceNeedsApiKey(source) {
+  return source === "anthropic" || source === "openai";
+}
+
+function normalizeModel(model) {
+  if (typeof model === "string") return { id: model, display_name: model };
+  return { id: model.id, display_name: model.display_name || model.id };
+}
+
+function formatModelLabel(model) {
+  const name = model.display_name || model.id;
+  if (name === model.id) return model.id;
+  return `${name} (${model.id})`;
+}
+
+function setModelStatus(provider, text, isError = false) {
+  const cfg = MODEL_PROVIDERS[provider];
+  const status = document.getElementById(cfg.statusId);
+  if (!status) return;
+  status.textContent = text || "";
+  status.classList.toggle("error", isError);
+  status.classList.toggle("hint", !isError);
+}
+
+function setModelOptions(provider, models, selectedValue) {
+  const cfg = MODEL_PROVIDERS[provider];
+  const select = document.getElementById(cfg.selectId);
+  if (!select) return;
+
+  const mode = getCurrentAiMode();
+  const isCli = mode === "claude-cli" || mode === "codex-cli" || mode === "opencode-cli";
+
+  const selected = selectedValue || select.value || state[cfg.configKey] || "";
+  const normalized = (models || []).map(normalizeModel).filter(m => m.id && m.id !== "default");
+  const hasSelected = normalized.some(m => m.id === selected);
+  if (selected && !hasSelected && selected !== "default") {
+    normalized.unshift({ id: selected, display_name: `${selected} (config corrente)` });
+  }
+
+  select.innerHTML = "";
+  if (isCli) {
+    const defOpt = document.createElement("option");
+    defOpt.value = "";
+    defOpt.textContent = "(default)";
+    select.appendChild(defOpt);
+  }
+  for (const model of normalized) {
+    const option = document.createElement("option");
+    option.value = model.id;
+    option.textContent = formatModelLabel(model);
+    select.appendChild(option);
+  }
+
+  if (!selected || selected === "default") select.value = "";
+  else select.value = selected;
+}
+
+async function loadCachedModelOptions(provider) {
+  if (!hasTauri) return;
+  const cfg = MODEL_PROVIDERS[provider];
+  const source = getActiveModelSource(provider);
+  try {
+    const models = await tauriInvoke("get_cached_ai_models", { provider: source });
+    if (models?.length) {
+      setModelOptions(provider, models, state[cfg.configKey]);
+      setModelStatus(provider, `${models.length} modelli in cache. Premi ↻ per aggiornare.`);
+    } else {
+      setModelOptions(provider, [], state[cfg.configKey]);
+      setModelStatus(provider, "Nessun modello in cache. Premi ↻ per aggiornare.");
+    }
+  } catch (e) {
+    setModelStatus(provider, "", false);
+  }
+}
+
+async function refreshModelOptions(provider) {
+  if (!hasTauri) return;
+  const cfg = MODEL_PROVIDERS[provider];
+  const button = document.getElementById(cfg.buttonId);
+  const source = getActiveModelSource(provider);
+  const needsApiKey = sourceNeedsApiKey(source);
+  const apiKey = needsApiKey ? document.getElementById(cfg.keyInputId).value.trim() : "";
+  if (needsApiKey && !apiKey) {
+    setModelStatus(provider, "Inserisci la API key per aggiornare la lista modelli.", true);
+    return;
+  }
+
+  const previousText = button.textContent;
+  button.disabled = true;
+  button.textContent = "...";
+  setModelStatus(provider, "Aggiornamento modelli in corso...");
+
+  try {
+    const result = await tauriInvoke("refresh_ai_models", { provider: source, apiKey });
+    const models = Array.isArray(result) ? result : result.models;
+    setModelOptions(provider, models, document.getElementById(cfg.selectId).value);
+    if (result.stale) {
+      setModelStatus(provider, `${models.length} modelli da cache; refresh non riuscito: ${result.error}`, true);
+    } else {
+      setModelStatus(provider, `${models.length} modelli disponibili aggiornati ora.`);
+    }
+  } catch (e) {
+    setModelStatus(provider, String(e), true);
+  } finally {
+    button.disabled = false;
+    button.textContent = previousText;
+  }
+}
+
+function handleAiModeChange() {
+  updateAiFieldsVisibility();
+  const mode = getCurrentAiMode();
+  if (mode === "claude-cli" || mode === "claude-api" || mode === "opencode-cli") {
+    setModelStatus("anthropic", "");
+    loadCachedModelOptions("anthropic").catch(() => {});
+  }
+  if (mode === "codex-cli" || mode === "openai-api") {
+    setModelStatus("openai", "");
+    loadCachedModelOptions("openai").catch(() => {});
+  }
+}
+
 async function testConnection() {
   const url = $("#server-url-input").value.trim();
   if (!url) { $("#test-connection-status").textContent = "URL mancante"; return; }
@@ -971,8 +1122,8 @@ async function saveSettings() {
   const url = $("#server-url-input").value.trim();
   state.serverUrl = url;
   state.aiMode = $("#ai-mode-select").value;
-  state.claudeModel = $("#ai-claude-model").value;
-  state.openaiModel = $("#ai-openai-model").value.trim() || "gpt-4o";
+  state.claudeModel = $("#ai-claude-model").value || "";
+  state.openaiModel = $("#ai-openai-model").value || "";
   state.anthropicApiKey = $("#ai-anthropic-key").value.trim();
   state.openaiApiKey = $("#ai-openai-key").value.trim();
   await saveConfig();
@@ -2306,7 +2457,9 @@ async function init() {
   $("#close-settings-btn").onclick = closeSettings;
   $("#save-settings-btn").onclick = saveSettings;
   $("#test-connection-btn").onclick = testConnection;
-  $("#ai-mode-select").onchange = updateAiFieldsVisibility;
+  $("#ai-mode-select").onchange = handleAiModeChange;
+  $("#refresh-claude-models").onclick = () => refreshModelOptions("anthropic");
+  $("#refresh-openai-models").onclick = () => refreshModelOptions("openai");
   $("#theme-toggle").onclick = cycleTheme;
   $("#refresh-btn").onclick = () => refreshAll();
   $("#include-authorized").onchange = (e) => { state.includeAuthorized = e.target.checked; refreshChart(); };
